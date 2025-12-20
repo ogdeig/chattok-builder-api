@@ -1,1 +1,519 @@
+/* style.template.css — ChatTok MPG Template (matches current index.template.html)
+   Server injects theme by editing ONLY :root variables:
+   --pink (primary), --aqua (secondary), --bg (background)
+*/
 
+:root{
+  --pink:#ff0050;          /* primary (server injects) */
+  --aqua:#00f2ea;          /* secondary (server injects) */
+  --bg:#0b0f14;            /* background (server injects) */
+
+  --text:#eaf2ff;
+  --muted:rgba(234,242,255,.74);
+  --muted2:rgba(234,242,255,.55);
+
+  --panel:rgba(14,20,30,.76);
+  --panel2:rgba(10,14,22,.62);
+  --line:rgba(255,255,255,.12);
+
+  --shadow:0 14px 40px rgba(0,0,0,.50);
+  --shadow2:0 10px 24px rgba(0,0,0,.40);
+
+  --r-xl:22px;
+  --r-lg:18px;
+  --r-md:14px;
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --sans: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+}
+
+*{ box-sizing:border-box; }
+html,body{ height:100%; margin:0; }
+body{
+  font-family:var(--sans);
+  color:var(--text);
+  background:var(--bg);
+  overflow:hidden;
+}
+
+/* ---------- Center app ---------- */
+#app{
+  position:relative;
+  height:100vh;
+  width:100vw;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding:10px;
+}
+
+/* ---------- 9:16 game screen ---------- */
+#gameScreen.game-screen{
+  position:relative;
+  width:min(100vw, 430px);
+  aspect-ratio: 9 / 16;
+  border-radius: var(--r-xl);
+  overflow:hidden;
+  box-shadow: var(--shadow);
+  border:1px solid rgba(255,255,255,.10);
+  background: transparent;
+}
+
+/* Layered depth background on the 9:16 container */
+#gameScreen::before,
+#gameScreen::after{
+  content:"";
+  position:absolute;
+  inset:-20%;
+  pointer-events:none;
+}
+
+#gameScreen::before{
+  background:
+    radial-gradient(1000px 700px at 20% 12%, rgba(0,242,234,.16), transparent 56%),
+    radial-gradient(900px 650px at 80% 20%, rgba(255,0,80,.14), transparent 56%),
+    radial-gradient(900px 750px at 50% 92%, rgba(255,255,255,.05), transparent 60%),
+    linear-gradient(180deg, rgba(255,255,255,.03), transparent 35%),
+    linear-gradient(180deg, rgba(0,0,0,.25), rgba(0,0,0,.58));
+  filter: saturate(1.08) contrast(1.08);
+}
+
+#gameScreen::after{
+  background:
+    radial-gradient(circle at 12% 30%, rgba(255,255,255,.10) 0 2px, transparent 3px),
+    radial-gradient(circle at 42% 62%, rgba(255,255,255,.08) 0 2px, transparent 3px),
+    radial-gradient(circle at 70% 25%, rgba(255,255,255,.10) 0 2px, transparent 3px),
+    radial-gradient(circle at 88% 66%, rgba(255,255,255,.07) 0 2px, transparent 3px),
+    radial-gradient(circle at 30% 82%, rgba(255,255,255,.06) 0 2px, transparent 3px);
+  opacity:.6;
+  animation: drift 10s linear infinite;
+}
+
+@keyframes drift{
+  0%{ transform: translate3d(0,0,0); }
+  50%{ transform: translate3d(-1.5%, 1.25%, 0); }
+  100%{ transform: translate3d(0,0,0); }
+}
+
+/* ---------- Wrapper layout inside 9:16 ---------- */
+.game-wrapper{
+  position:absolute;
+  inset:0;
+  display:flex;
+  flex-direction:column;
+  z-index:5;
+}
+
+/* ---------- Topbar (HUD-ish) ---------- */
+.topbar{
+  display:flex;
+  justify-content:space-between;
+  align-items:center;
+  gap:10px;
+  padding:10px 10px 8px;
+}
+
+.game-name{
+  font-weight:950;
+  letter-spacing:.2px;
+  font-size:14px;
+  text-shadow: 0 12px 28px rgba(0,0,0,.45);
+}
+
+.game-sub{
+  font-size:12px;
+  color:var(--muted);
+  line-height:1.2;
+  margin-top:2px;
+}
+
+.pill{
+  display:inline-flex;
+  align-items:center;
+  gap:8px;
+  padding:8px 10px;
+  border-radius:999px;
+  border:1px solid rgba(255,255,255,.12);
+  background: rgba(0,0,0,.35);
+  font-family: var(--mono);
+  font-size:12px;
+  color: var(--muted);
+  white-space:nowrap;
+  box-shadow: var(--shadow2);
+}
+
+.status-text{
+  font-weight:900;
+  color: rgba(234,242,255,.9);
+}
+
+/* ---------- Main/Side layout ---------- */
+.layout{
+  position:relative;
+  flex:1;
+  display:flex;
+  gap:10px;
+  padding: 0 10px 10px;
+}
+
+.main{
+  flex:1;
+  min-width:0;
+}
+
+/* Viewport holds the gameRoot cards */
+.viewport{
+  position:relative;
+  height:100%;
+  border-radius: var(--r-lg);
+  border:1px solid rgba(255,255,255,.10);
+  background: linear-gradient(180deg, rgba(18,26,38,.30), rgba(10,14,22,.16));
+  box-shadow: var(--shadow2);
+  overflow:hidden;
+}
+
+.safe-top{ height: 4px; }
+.safe-bottom{ height: 6px; }
+
+/* Where game.js renders */
+#gameRoot.game-root{
+  position:relative;
+  height:100%;
+  overflow:auto;
+  padding: 10px;
+  display:flex;
+  flex-direction:column;
+  gap:10px;
+}
+
+/* Hide scrollbars but keep scrolling */
+#gameRoot::-webkit-scrollbar{ width:0; height:0; }
+
+/* Side panel becomes an overlay for flags so it doesn’t shrink the game */
+.side{
+  position:absolute;
+  top: 0;
+  right: 10px;
+  bottom: 0;
+  width: 240px;
+  pointer-events:none;
+  display:flex;
+  align-items:flex-start;
+  justify-content:flex-end;
+}
+
+.side-card{
+  margin-top: 0;
+  width: 240px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
+.side-title, .side-foot{ display:none; }
+
+/* ---------- Flags stack (non-overlapping) ---------- */
+#flags.flags{
+  position:relative;
+  width: 240px;
+  display:flex;
+  flex-direction:column;
+  gap: 10px;
+  pointer-events:none;
+  padding-top: 0;
+}
+
+.flag{
+  pointer-events:none;
+  display:flex;
+  gap: 10px;
+  align-items:center;
+  padding: 10px 10px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: linear-gradient(180deg, rgba(10,14,22,.72), rgba(10,14,22,.52));
+  box-shadow: 0 12px 28px rgba(0,0,0,.38);
+  backdrop-filter: blur(10px);
+  transform: translateX(0);
+  opacity: 1;
+  animation: popIn .22s ease-out;
+}
+
+@keyframes popIn{
+  from{ transform: translateX(18px); opacity:0; }
+  to{ transform: translateX(0); opacity:1; }
+}
+
+.flag .pfp{
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255,255,255,.14);
+  background:
+    radial-gradient(16px 16px at 30% 25%, rgba(255,255,255,.18), transparent 65%),
+    linear-gradient(135deg, rgba(0,242,234,.25), rgba(255,0,80,.18)),
+    rgba(0,0,0,.25);
+  overflow:hidden;
+}
+
+.flag img.pfp{
+  object-fit: cover;
+  display:block;
+}
+
+.flagText{ min-width:0; }
+.flagText .who{
+  font-weight: 950;
+  font-size: 12px;
+  line-height: 1.1;
+  color: rgba(234,242,255,.92);
+  max-width: 170px;
+  overflow:hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flagText .msg{
+  font-size: 12px;
+  color: rgba(234,242,255,.70);
+  line-height: 1.2;
+  max-width: 170px;
+  overflow:hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---------- Footer ---------- */
+.footer-text{
+  padding: 0 10px 10px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: rgba(234,242,255,.74);
+  text-shadow: 0 8px 20px rgba(0,0,0,.45);
+}
+
+/* ---------- Cards used by game.js template ---------- */
+.card{
+  background: linear-gradient(180deg, rgba(18,26,38,.78), rgba(10,14,22,.60));
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: var(--r-lg);
+  box-shadow: var(--shadow2);
+  padding: 12px 12px;
+  backdrop-filter: blur(10px);
+}
+
+.card h3{
+  margin:0 0 8px;
+  font-size: 13px;
+  letter-spacing: .25px;
+  text-transform: uppercase;
+  font-family: var(--mono);
+  color: rgba(234,242,255,.82);
+}
+
+.card p{
+  margin:0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.bigText{
+  font-size: 22px;
+  font-weight: 950;
+  letter-spacing: .3px;
+  text-shadow: 0 12px 28px rgba(0,0,0,.45);
+  margin: 2px 2px 2px;
+  animation: bob 3.4s ease-in-out infinite;
+}
+
+@keyframes bob{
+  0%,100%{ transform: translateY(0); }
+  50%{ transform: translateY(-3px); }
+}
+
+.meterGrid{
+  display:grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.meter{
+  position:relative;
+  width:100%;
+  height: 10px;
+  border-radius: 999px;
+  overflow:hidden;
+  background: rgba(255,255,255,.08);
+  border: 1px solid rgba(255,255,255,.10);
+}
+
+.meter > div{
+  position:absolute;
+  inset:0 auto 0 0;
+  width: 0%;
+  background: linear-gradient(90deg, var(--aqua), var(--pink));
+  box-shadow: 0 0 24px rgba(0,242,234,.18);
+  border-radius: 999px;
+  transition: width .18s ease;
+}
+
+/* ---------- Buttons ---------- */
+.primary-btn{
+  appearance:none;
+  border:none;
+  cursor:pointer;
+  border-radius: 14px;
+  padding: 12px 14px;
+  font-weight: 900;
+  letter-spacing: .2px;
+  color: #0b0f14;
+  background: linear-gradient(135deg, var(--pink), rgba(255,0,80,.75));
+  box-shadow: 0 12px 26px rgba(255,0,80,.20);
+  transition: transform .12s ease, filter .12s ease;
+}
+
+.primary-btn:hover{ filter: brightness(1.06) saturate(1.08); }
+.primary-btn:active{ transform: translateY(1px) scale(.99); }
+
+/* ---------- Setup overlay (matches your current HTML classes) ---------- */
+#setupOverlay.overlay{
+  position:absolute;
+  inset:0;
+  z-index: 60;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  padding: 16px;
+  background:
+    radial-gradient(700px 550px at 20% 15%, rgba(0,242,234,.12), transparent 60%),
+    radial-gradient(700px 550px at 80% 25%, rgba(255,0,80,.12), transparent 60%),
+    rgba(0,0,0,.55);
+  backdrop-filter: blur(10px);
+}
+
+.overlay-card{
+  width: min(420px, 94%);
+  border-radius: var(--r-xl);
+  border: 1px solid rgba(255,255,255,.14);
+  background: linear-gradient(180deg, rgba(18,26,38,.88), rgba(10,14,22,.78));
+  box-shadow: var(--shadow);
+  padding: 14px;
+}
+
+.overlay-card .title{
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 950;
+}
+
+.overlay-card .subtitle{
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.form-grid{
+  display:grid;
+  grid-template-columns: 1fr;
+  gap:10px;
+}
+
+.field{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+}
+
+.field-label{
+  font-family: var(--mono);
+  font-size: 11px;
+  color: rgba(234,242,255,.72);
+  text-transform: uppercase;
+  letter-spacing: .7px;
+}
+
+.field input,
+.field select,
+.field textarea{
+  width:100%;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(0,0,0,.30);
+  color: rgba(234,242,255,.92);
+  padding: 12px 12px;
+  outline: none;
+  font-size: 14px;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus{
+  border-color: rgba(0,242,234,.40);
+  box-shadow: 0 0 0 3px rgba(0,242,234,.12);
+}
+
+.status-line{
+  margin: 10px 0 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: rgba(234,242,255,.82);
+  min-height: 18px;
+}
+
+/* How-to box */
+.hint{
+  margin-top: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(0,0,0,.26);
+  padding: 10px;
+}
+
+.hint-title{
+  font-family: var(--mono);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: rgba(234,242,255,.86);
+  margin-bottom: 6px;
+}
+
+.hint-sub{
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.hint-sub.muted{
+  margin-top: 8px;
+  color: rgba(234,242,255,.56);
+}
+
+.hint-list{
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: rgba(234,242,255,.72);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+/* ---------- Responsive tweaks ---------- */
+@media (max-width: 430px){
+  #gameScreen.game-screen{
+    width: 100vw;
+    border-radius: 0;
+    border: none;
+  }
+  .side{ right: 8px; width: 220px; }
+  #flags.flags{ width: 220px; }
+  .bigText{ font-size: 20px; }
+}
+
+@media (max-width: 360px){
+  .side{ width: 200px; }
+  #flags.flags{ width: 200px; }
+  .meterGrid{ grid-template-columns: 1fr; }
+}

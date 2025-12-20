@@ -1,1 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>{{TITLE}}</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div id="app">
 
+    <!-- ===============================
+         START / SETUP OVERLAY
+         =============================== -->
+    <div id="setupOverlay" class="overlay">
+      <div class="overlay-card">
+        <h1 class="title">{{TITLE}}</h1>
+        <p class="subtitle">{{SUBTITLE}}</p>
+
+        <!-- All setup inputs live in one consistent grid so nothing looks like a duplicate LIVE ID -->
+        <div class="form-grid" id="setupFields">
+
+          <label class="field field-span">
+            <span class="field-label">TikTok LIVE ID (username only)</span>
+            <input
+              id="liveIdInput"
+              type="text"
+              placeholder="username (without @)"
+              autocomplete="off"
+              autocapitalize="none"
+              spellcheck="false"
+            />
+          </label>
+
+          <!--
+            Server injects additional settings fields here.
+            RULE: Do NOT inject another TikTok LIVE ID field.
+            Prefer:
+              <label class="field">
+                <span class="field-label">Grid Size</span>
+                <select data-setting="gridSize">...</select>
+              </label>
+            If you inject a raw <div> with an <input>, CSS will still style it.
+          -->
+          {{SETTINGS_FIELDS_HTML}}
+
+        </div>
+
+        <button id="startGameBtn" class="primary-btn">Connect &amp; Start Game</button>
+
+        <p id="statusText" class="status-line">Not connected</p>
+
+        <div class="hint">
+          <div class="hint-title">How to play</div>
+          <div class="hint-sub">{{ONE_SENTENCE}}</div>
+          <ul class="hint-list">{{HOW_TO_PLAY_LI}}</ul>
+          <div class="hint-sub muted">
+            Tip: if connection fails, check your LIVE ID and token injection, then retry.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===============================
+         GAME SCREEN (9:16 VIEWPORT)
+         =============================== -->
+    <div id="gameScreen" class="game-screen">
+      <div class="game-wrapper">
+
+        <header class="topbar">
+          <div class="topbar-left">
+            <div class="game-name">{{TITLE}}</div>
+            <div class="game-sub">{{SUBTITLE}}</div>
+          </div>
+          <div class="topbar-right">
+            <span class="pill">Status: <span id="statusTextInGame" class="status-text">Disconnected</span></span>
+          </div>
+        </header>
+
+        <main class="layout">
+          <section class="main">
+            <div class="viewport">
+              <div class="safe-top"></div>
+              <div id="gameRoot" class="game-root">
+                <!-- game.js renders here -->
+              </div>
+              <div class="safe-bottom"></div>
+            </div>
+          </section>
+
+          <aside class="side">
+            <div class="side-card">
+              <div class="side-title">Live Events</div>
+              <div id="flags" class="flags"></div>
+              <div class="side-foot">Chat / likes / gifts pop here.</div>
+            </div>
+          </aside>
+        </main>
+
+        <footer class="footer-text">
+          Connection: <span id="statusTextFooter" class="status-text">Disconnected</span>
+        </footer>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Protobuf + TikTok client stack (same pattern as your existing projects) -->
+  <script src="https://cdn.jsdelivr.net/npm/google-protobuf@3.21.2/google-protobuf.js"></script>
+  <script src="generic.js"></script>
+  <script src="unknownobjects.js"></script>
+  <script src="data_linkmic_messages.js"></script>
+  <script src="tiktok-client.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>

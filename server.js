@@ -4,13 +4,15 @@ const rateLimit = require("express-rate-limit");
 const fs = require("fs");
 const path = require("path");
 
-// OPTIONAL: dotenv for local dev only (Render uses Environment Variables)
+// Local dev only; Render uses Environment Variables
 try { require("dotenv").config(); } catch {}
 
 const app = express();
 app.set("trust proxy", 1);
 
-// ---- CORS (MUST be early, before routes & ideally before rate limit) ----
+// -----------------------------
+// CORS (must be early)
+// -----------------------------
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map(s => s.trim())
@@ -18,15 +20,14 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
 
 const corsOptions = {
   origin(origin, cb) {
-    // Allow curl / server-to-server / same-origin file loads
+    // allow curl / server-to-server
     if (!origin) return cb(null, true);
 
-    // DEV MODE: if no allowlist set, allow all
+    // DEV fallback: if no allowlist, allow all
     if (allowedOrigins.length === 0) return cb(null, true);
 
     if (allowedOrigins.includes(origin)) return cb(null, true);
 
-    // Explicit block
     return cb(new Error(`CORS blocked origin: ${origin}`), false);
   },
   methods: ["GET", "POST", "OPTIONS"],
@@ -35,13 +36,13 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-// Handle preflight for all routes
 app.options("*", cors(corsOptions));
 
-// ---- Body parsing ----
-app.use(express.json({ limit: "2mb" }));
+// -----------------------------
+// Middleware
+// -----------------------------
+app.use(express.json({ limit: "10mb" }));
 
-// ---- Rate limit (after CORS so even 429 has CORS headers) ----
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
@@ -52,6 +53,12 @@ app.use(
 );
 
 app.get("/favicon.ico", (_req, res) => res.status(204).end());
+
+// Node 18+ required for global fetch
+if (typeof fetch !== "function") {
+  console.error("ERROR: global fetch is missing. Use Node 18+.");
+  process.exit(1);
+}
 
 // -----------------------------
 // Helpers
@@ -128,14 +135,18 @@ function parseJsonLoose(rawText) {
 }
 
 // -----------------------------
-// Templates
+// Templates (ROOT of ChatOck-Builder-API)
 // -----------------------------
 function resolveTemplatePath(fileName) {
+  // Your repo root is ChatOck-Builder-API, server.js is in root.
+  // We support both:
+  // - /index.template.html (root)
+  // - /templates/index.template.html
   const cwd = process.cwd();
   const dir = __dirname;
 
   const candidates = [
-    // cwd (Render root dir)
+    // cwd
     path.join(cwd, fileName),
     path.join(cwd, "templates", fileName),
 
@@ -143,7 +154,7 @@ function resolveTemplatePath(fileName) {
     path.join(dir, fileName),
     path.join(dir, "templates", fileName),
 
-    // one folder up (if Root Directory is set to "api")
+    // if Render root directory is set to a subfolder, allow one-up
     path.join(cwd, "..", fileName),
     path.join(cwd, "..", "templates", fileName),
     path.join(dir, "..", fileName),
@@ -151,7 +162,9 @@ function resolveTemplatePath(fileName) {
   ];
 
   for (const p of candidates) {
-    try { if (fs.existsSync(p)) return p; } catch {}
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {}
   }
   return "";
 }
@@ -209,6 +222,7 @@ function injectThemeVars(cssText, theme) {
   if (!th.primary && !th.secondary && !th.background) return String(cssText || "");
 
   let out = String(cssText || "");
+
   const replaceVar = (name, value) => {
     if (!value) return;
     const re = new RegExp(`(--${name}\\s*:\\s*)([^;]+)(;)`, "i");
@@ -216,6 +230,7 @@ function injectThemeVars(cssText, theme) {
     else out = out.replace(/:root\s*\{/, `:root{\n  --${name}:${value};`);
   };
 
+  // Your css template uses --pink, --aqua, --bg
   replaceVar("pink", th.primary);
   replaceVar("aqua", th.secondary);
   replaceVar("bg", th.background);
@@ -236,7 +251,10 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt }) {
 
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
     body: JSON.stringify(payload),
   });
 
@@ -252,7 +270,7 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt }) {
 }
 
 // -----------------------------
-// Spec + AI region generation (same logic you had)
+// Spec + AI region generation
 // -----------------------------
 async function generateSpec({ apiKey, model, idea, templateId }) {
   const prompt = [
@@ -314,21 +332,25 @@ async function generateSpec({ apiKey, model, idea, templateId }) {
 function fallbackAiRegion() {
   return `
 function aiInit(ctx){
-  renderBase(); renderMeters();
+  renderBase();
+  renderMeters();
   ctx.ui.flag({ who:"SYSTEM", msg:"Demo running — connect to TikTok to go live.", pfp:"" });
 }
 function aiOnChat(ctx, chat){
   if (!chat || !chat.text) return;
   if (chat.text.toLowerCase().includes("boom")) {
-    ctx.ui.flag({ who: chat.nickname || "viewer", msg:"💥 BOOM!", pfp: chat.pfp || "" });
+    ctx.ui.flag({ who: chat.nickname || "viewer", msg: "💥 BOOM!", pfp: chat.pfp || "" });
   }
 }
 function aiOnLike(ctx, like){
-  if ((ctx.state.counters.likes % 50) === 0) ctx.ui.flag({ who:"SYSTEM", msg:"Likes power rising ⚡", pfp:"" });
+  if ((ctx.state.counters.likes % 50) === 0) {
+    ctx.ui.flag({ who:"SYSTEM", msg:"Likes power rising ⚡", pfp:"" });
+  }
 }
 function aiOnGift(ctx, gift){
-  ctx.ui.flag({ who: gift.nickname || "viewer", msg:"Gift power-up activated 🎁", pfp: gift.pfp || "" });
-}`.trim();
+  ctx.ui.flag({ who: gift.nickname || "viewer", msg: "Gift power-up activated 🎁", pfp: gift.pfp || "" });
+}
+`.trim();
 }
 
 function sanitizeAiRegion(code) {
@@ -378,6 +400,9 @@ async function generateAiRegion({ apiKey, model, idea, spec, templateId, changeR
   return checked.code;
 }
 
+// -----------------------------
+// Template injection
+// -----------------------------
 function replaceBetweenMarkers(fullText, startMarker, endMarker, replacement) {
   const a = fullText.indexOf(startMarker);
   const b = fullText.indexOf(endMarker);
@@ -394,6 +419,8 @@ function injectSpecIntoGameJs(gameTemplate, spec) {
 
 function enforceLockedTikTokAndConnectFirst(jsText) {
   let out = String(jsText || "");
+
+  // token safety
   out = out.replace(
     /client\.setAccessToken\(\s*window\.CHATTOK_CREATOR_TOKEN\s*\|\|\s*""\s*\)\s*;?/g,
     `
@@ -405,24 +432,52 @@ function enforceLockedTikTokAndConnectFirst(jsText) {
   }
 `.trim()
   );
+
+  // CONNECT-FIRST: keep overlay until connected event (template-dependent)
+  out = out.replace(
+    /\n\s*hideOverlay\(\)\s*;\s*\n/g,
+    "\n      // CONNECT-FIRST: keep overlay open until 'connected'\n"
+  );
+
+  if (!out.includes("CONNECT-FIRST: hide overlay on connected")) {
+    out = out.replace(
+      /ctx\.connected\s*=\s*true\s*;\s*\n/g,
+      (m) =>
+        m +
+        "    // CONNECT-FIRST: hide overlay on connected\n" +
+        "    try { hideOverlay(); } catch {}\n"
+    );
+  }
+
   return out;
 }
 
+// -----------------------------
+// HTML rendering (index.template.html)
+// -----------------------------
 function renderSettingsFieldsHtml(spec) {
   const round = Number(spec?.defaultSettings?.roundSeconds || 20);
   const goal = Number(spec?.defaultSettings?.winGoal || 100);
+
   return `
-<label class="field"><span class="field-label">Round seconds</span>
+<label class="field">
+  <span class="field-label">Round seconds</span>
   <input data-setting="roundSeconds" type="number" min="5" max="300" value="${round}" />
 </label>
-<label class="field"><span class="field-label">Win goal</span>
+
+<label class="field">
+  <span class="field-label">Win goal</span>
   <input data-setting="winGoal" type="number" min="1" max="999" value="${goal}" />
-</label>`.trim();
+</label>
+`.trim();
 }
 
 function renderHowToLi(spec) {
   const items = Array.isArray(spec?.howToPlay) ? spec.howToPlay : [];
-  return items.slice(0, 10).map(x => `<li>${escapeHtml(String(x || ""))}</li>`).join("\n");
+  return items
+    .slice(0, 10)
+    .map((x) => `<li>${escapeHtml(String(x || ""))}</li>`)
+    .join("\n");
 }
 
 function renderIndexHtml(indexTemplate, spec) {
@@ -435,6 +490,14 @@ function renderIndexHtml(indexTemplate, spec) {
   return html;
 }
 
+// -----------------------------
+// Validations
+// -----------------------------
+function validateGeneratedCss(css) {
+  if (!css.includes(":root")) throw new Error("style.css missing :root block");
+  if (!css.includes("--pink") || !css.includes("--aqua")) throw new Error("style.css missing theme vars (--pink/--aqua)");
+}
+
 function validateGeneratedHtml(html) {
   const requiredIds = ["setupOverlay", "startGameBtn", "liveIdInput", "gameRoot", "flags"];
   for (const id of requiredIds) {
@@ -444,51 +507,64 @@ function validateGeneratedHtml(html) {
   }
 }
 
-function validateGeneratedCss(css) {
-  if (!css.includes(":root")) throw new Error("style.css missing :root block");
-  if (!css.includes("--pink") || !css.includes("--aqua")) throw new Error("style.css missing theme vars");
-}
-
 function validateGeneratedJs(js) {
   if (!js.includes("new TikTokClient")) throw new Error("game.js missing TikTokClient usage");
   if (!js.includes("// === AI_REGION_START ===") || !js.includes("// === AI_REGION_END ===")) {
     throw new Error("game.js missing AI_REGION markers");
   }
+  if (js.includes("setAccessToken(window.CHATTOK_CREATOR_TOKEN")) {
+    throw new Error("game.js violates token rule");
+  }
 }
 
+// -----------------------------
+// POST /api/generate (STAGED)
+// -----------------------------
 app.post("/api/generate", async (req, res) => {
   try {
     const stage = normalizeStage(req.body?.stage);
-    const idea = pickIdea(req.body);
-    assert(idea, "Missing idea text.");
+    assert(stage, "Missing stage. Use html, css, or js.");
 
     const templateId = String(req.body?.templateId || req.body?.template || "boss").trim().toLowerCase();
     const theme = req.body?.theme || req.body?.colors || {};
     const ctx = req.body?.context && typeof req.body.context === "object" ? req.body.context : {};
     const ctxSpec = ctx.spec || null;
 
-    const modelSpec = String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim();
-    const modelJs = String(process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
-
-    // CSS stage: NO LLM
+    // ✅ CSS stage does NOT require idea or OpenAI key
     if (stage === "css") {
       const css = injectThemeVars(TEMPLATES.css, theme);
       validateGeneratedCss(css);
-      return res.json({ ok: true, stage, file: { name: "style.css", content: css }, context: { spec: ctxSpec, templateId } });
+      return res.json({
+        ok: true,
+        stage,
+        file: { name: "style.css", content: css },
+        context: { spec: ctxSpec, templateId },
+      });
     }
 
+    // HTML/JS stages need idea
+    const idea = pickIdea(req.body);
+    assert(idea, "Missing idea text.");
+
+    // OpenAI key required for html/js
     const apiKey = process.env.OPENAI_API_KEY;
     assert(String(apiKey || "").trim(), "OPENAI_API_KEY is blank. Set it in Render Environment Variables.");
 
-    // HTML stage
+    const modelSpec = String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim();
+    const modelJs = String(process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
+
     if (stage === "html") {
       const spec = await generateSpec({ apiKey, model: modelSpec, idea, templateId });
       const html = renderIndexHtml(TEMPLATES.index, spec);
       validateGeneratedHtml(html);
-      return res.json({ ok: true, stage, file: { name: "index.html", content: html }, context: { spec, templateId } });
+      return res.json({
+        ok: true,
+        stage,
+        file: { name: "index.html", content: html },
+        context: { spec, templateId },
+      });
     }
 
-    // JS stage
     if (stage === "js") {
       const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateId }));
       const aiCode = await generateAiRegion({ apiKey, model: modelJs, idea, spec, templateId });
@@ -498,7 +574,12 @@ app.post("/api/generate", async (req, res) => {
       js = enforceLockedTikTokAndConnectFirst(js);
       validateGeneratedJs(js);
 
-      return res.json({ ok: true, stage, file: { name: "game.js", content: js }, context: { spec, templateId } });
+      return res.json({
+        ok: true,
+        stage,
+        file: { name: "game.js", content: js },
+        context: { spec, templateId },
+      });
     }
 
     throw new Error("Invalid stage. Use html, css, or js.");
@@ -512,6 +593,9 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
+// -----------------------------
+// POST /api/edit (AI_REGION only)
+// -----------------------------
 app.post("/api/edit", async (req, res) => {
   try {
     const remaining = Number(req.body?.remainingEdits ?? 0);
@@ -532,7 +616,12 @@ app.post("/api/edit", async (req, res) => {
     if (/\b(theme|color|colour|primary|secondary|background)\b/i.test(changeRequest)) {
       const css = injectThemeVars(TEMPLATES.css, theme);
       validateGeneratedCss(css);
-      return res.json({ ok: true, remainingEdits: remaining - 1, patches: [{ name: "style.css", content: css }] });
+      return res.json({
+        ok: true,
+        remainingEdits: remaining - 1,
+        patches: [{ name: "style.css", content: css }],
+        notes: "Theme updated.",
+      });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -563,23 +652,38 @@ app.post("/api/edit", async (req, res) => {
     validateGeneratedJs(newJs);
     if (currentCss) validateGeneratedCss(currentCss);
 
-    return res.json({ ok: true, remainingEdits: remaining - 1, patches: [{ name: "game.js", content: newJs }] });
+    return res.json({
+      ok: true,
+      remainingEdits: remaining - 1,
+      patches: [{ name: "game.js", content: newJs }],
+      notes: "Updated AI_REGION in game.js.",
+    });
   } catch (err) {
     console.error("/api/edit error:", err);
-    return res.status(err.status || 500).json({ ok: false, error: err?.message || String(err) });
+    return res.status(err.status || 500).json({
+      ok: false,
+      error: err?.message || String(err),
+      details: err.details || null,
+    });
   }
 });
 
+// -----------------------------
+// GET /health
+// -----------------------------
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "builder-api",
-    endpoints: ["GET /health", "POST /api/generate", "POST /api/edit"],
+    endpoints: ["GET /health", "POST /api/generate", "POST /api/edit", "POST /api/reload-templates"],
     templates: { index: !!TEMPLATES.index, css: !!TEMPLATES.css, game: !!TEMPLATES.game },
     allowedOrigins: allowedOrigins.length ? allowedOrigins : "(dev: allow all)",
   });
 });
 
+// -----------------------------
+// Start server (ONLY ONCE)
+// -----------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Builder API running on port ${PORT}`);

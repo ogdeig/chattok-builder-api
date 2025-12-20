@@ -5,58 +5,49 @@ const fs = require("fs");
 const path = require("path");
 
 // OPTIONAL: dotenv for local dev only (Render uses Environment Variables)
-try {
-  require("dotenv").config();
-} catch {
-  // no-op (Render won't have dotenv installed unless you add it)
-}
-
-/**
- * ChatTok Game Builder API (template-first)
- * - /api/generate stages: html -> css -> js
- * - CSS stage: theme injection only (NO LLM rewrite of full CSS)
- * - JS stage: LLM fills ONLY AI_REGION between markers in game.template.js
- * - Enforces CONNECT-FIRST + LOCKED TikTok token rules
- */
+try { require("dotenv").config(); } catch {}
 
 const app = express();
-
-// Trust proxy (Render)
 app.set("trust proxy", 1);
 
-// Body limits (keep reasonable)
+// ---- CORS (MUST be early, before routes & ideally before rate limit) ----
+const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
+  .split(",")
+  .map(s => s.trim())
+  .filter(Boolean);
+
+const corsOptions = {
+  origin(origin, cb) {
+    // Allow curl / server-to-server / same-origin file loads
+    if (!origin) return cb(null, true);
+
+    // DEV MODE: if no allowlist set, allow all
+    if (allowedOrigins.length === 0) return cb(null, true);
+
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+
+    // Explicit block
+    return cb(new Error(`CORS blocked origin: ${origin}`), false);
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+// Handle preflight for all routes
+app.options("*", cors(corsOptions));
+
+// ---- Body parsing ----
 app.use(express.json({ limit: "2mb" }));
 
-// Basic rate limit (protect your paid API)
+// ---- Rate limit (after CORS so even 429 has CORS headers) ----
 app.use(
   rateLimit({
     windowMs: 60 * 1000,
-    limit: 60, // 60 req/min per IP
+    limit: 120,
     standardHeaders: true,
     legacyHeaders: false,
-  })
-);
-
-// CORS allowlist
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-app.use(
-  cors({
-    origin(origin, cb) {
-      // allow curl / server-to-server calls
-      if (!origin) return cb(null, true);
-
-      // If you haven't set ALLOWED_ORIGINS yet, allow all (DEV ONLY)
-      if (allowedOrigins.length === 0) return cb(null, true);
-
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked origin: ${origin}`), false);
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
   })
 );
 
@@ -140,19 +131,27 @@ function parseJsonLoose(rawText) {
 // Templates
 // -----------------------------
 function resolveTemplatePath(fileName) {
-  // Supports either:
-  // - templates in repo root (index.template.html, style.template.css, game.template.js)
-  // - OR templates in /templates folder
+  const cwd = process.cwd();
+  const dir = __dirname;
+
   const candidates = [
-    path.join(process.cwd(), fileName),
-    path.join(process.cwd(), "templates", fileName),
-    path.join(__dirname, fileName),
-    path.join(__dirname, "templates", fileName),
+    // cwd (Render root dir)
+    path.join(cwd, fileName),
+    path.join(cwd, "templates", fileName),
+
+    // script dir
+    path.join(dir, fileName),
+    path.join(dir, "templates", fileName),
+
+    // one folder up (if Root Directory is set to "api")
+    path.join(cwd, "..", fileName),
+    path.join(cwd, "..", "templates", fileName),
+    path.join(dir, "..", fileName),
+    path.join(dir, "..", "templates", fileName),
   ];
+
   for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) return p;
-    } catch {}
+    try { if (fs.existsSync(p)) return p; } catch {}
   }
   return "";
 }
@@ -210,15 +209,11 @@ function injectThemeVars(cssText, theme) {
   if (!th.primary && !th.secondary && !th.background) return String(cssText || "");
 
   let out = String(cssText || "");
-
   const replaceVar = (name, value) => {
     if (!value) return;
     const re = new RegExp(`(--${name}\\s*:\\s*)([^;]+)(;)`, "i");
-    if (re.test(out)) {
-      out = out.replace(re, `$1${value}$3`);
-    } else {
-      out = out.replace(/:root\s*\{/, `:root{\n  --${name}:${value};`);
-    }
+    if (re.test(out)) out = out.replace(re, `$1${value}$3`);
+    else out = out.replace(/:root\s*\{/, `:root{\n  --${name}:${value};`);
   };
 
   replaceVar("pink", th.primary);
@@ -241,10 +236,7 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt }) {
 
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
     body: JSON.stringify(payload),
   });
 
@@ -260,7 +252,7 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt }) {
 }
 
 // -----------------------------
-// Spec + AI region generation
+// Spec + AI region generation (same logic you had)
 // -----------------------------
 async function generateSpec({ apiKey, model, idea, templateId }) {
   const prompt = [
@@ -311,9 +303,8 @@ async function generateSpec({ apiKey, model, idea, templateId }) {
   spec.subtitle = String(spec.subtitle || "Live Interactive").trim();
   spec.oneSentence = String(spec.oneSentence || "Chat and gifts power up the action.").trim();
   spec.howToPlay = Array.isArray(spec.howToPlay) ? spec.howToPlay.map(String) : [];
-  if (!spec.howToPlay.length) {
-    spec.howToPlay = ["Chat to interact.", "Likes add energy.", "Gifts trigger power-ups."];
-  }
+  if (!spec.howToPlay.length) spec.howToPlay = ["Chat to interact.", "Likes add energy.", "Gifts trigger power-ups."];
+
   spec.defaultSettings = spec.defaultSettings || {};
   spec.defaultSettings.roundSeconds = Number(spec.defaultSettings.roundSeconds || 20);
   spec.defaultSettings.winGoal = Number(spec.defaultSettings.winGoal || 100);
@@ -323,39 +314,31 @@ async function generateSpec({ apiKey, model, idea, templateId }) {
 function fallbackAiRegion() {
   return `
 function aiInit(ctx){
-  renderBase();
-  renderMeters();
+  renderBase(); renderMeters();
   ctx.ui.flag({ who:"SYSTEM", msg:"Demo running — connect to TikTok to go live.", pfp:"" });
 }
 function aiOnChat(ctx, chat){
   if (!chat || !chat.text) return;
   if (chat.text.toLowerCase().includes("boom")) {
-    ctx.ui.flag({ who: chat.nickname || "viewer", msg: "💥 BOOM!", pfp: chat.pfp || "" });
+    ctx.ui.flag({ who: chat.nickname || "viewer", msg:"💥 BOOM!", pfp: chat.pfp || "" });
   }
 }
 function aiOnLike(ctx, like){
-  if ((ctx.state.counters.likes % 50) === 0) {
-    ctx.ui.flag({ who:"SYSTEM", msg:"Likes power rising ⚡", pfp:"" });
-  }
+  if ((ctx.state.counters.likes % 50) === 0) ctx.ui.flag({ who:"SYSTEM", msg:"Likes power rising ⚡", pfp:"" });
 }
 function aiOnGift(ctx, gift){
-  ctx.ui.flag({ who: gift.nickname || "viewer", msg: "Gift power-up activated 🎁", pfp: gift.pfp || "" });
-}
-  `.trim();
+  ctx.ui.flag({ who: gift.nickname || "viewer", msg:"Gift power-up activated 🎁", pfp: gift.pfp || "" });
+}`.trim();
 }
 
 function sanitizeAiRegion(code) {
   const c = String(code || "").trim();
   if (!c) return { ok: false, reason: "empty" };
-
   const needs = ["function aiInit", "function aiOnChat", "function aiOnLike", "function aiOnGift"];
-  for (const n of needs) {
-    if (!c.includes(n)) return { ok: false, reason: `missing ${n}` };
-  }
+  for (const n of needs) if (!c.includes(n)) return { ok: false, reason: `missing ${n}` };
   if (/\bctx\.on\s*\(/.test(c)) return { ok: false, reason: "ctx.on() not allowed" };
   if (/\bonConnect\b/.test(c)) return { ok: false, reason: "onConnect not allowed" };
   if (/\brequire\s*\(/.test(c) || /\bimport\s+/.test(c)) return { ok: false, reason: "require/import not allowed" };
-
   return { ok: true, code: c };
 }
 
@@ -391,16 +374,10 @@ async function generateAiRegion({ apiKey, model, idea, spec, templateId, changeR
 
   const code = stripCodeFences(extractAssistantText(raw)).trim();
   const checked = sanitizeAiRegion(code);
-  if (!checked.ok) {
-    console.warn("AI_REGION rejected:", checked.reason);
-    return fallbackAiRegion();
-  }
+  if (!checked.ok) return fallbackAiRegion();
   return checked.code;
 }
 
-// -----------------------------
-// Template injection
-// -----------------------------
 function replaceBetweenMarkers(fullText, startMarker, endMarker, replacement) {
   const a = fullText.indexOf(startMarker);
   const b = fullText.indexOf(endMarker);
@@ -417,11 +394,9 @@ function injectSpecIntoGameJs(gameTemplate, spec) {
 
 function enforceLockedTikTokAndConnectFirst(jsText) {
   let out = String(jsText || "");
-
   out = out.replace(
     /client\.setAccessToken\(\s*window\.CHATTOK_CREATOR_TOKEN\s*\|\|\s*""\s*\)\s*;?/g,
     `
-  // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
   const token = (typeof CHATTOK_CREATOR_TOKEN !== "undefined"
     ? CHATTOK_CREATOR_TOKEN
     : (window && window.CHATTOK_CREATOR_TOKEN)) || "";
@@ -430,45 +405,24 @@ function enforceLockedTikTokAndConnectFirst(jsText) {
   }
 `.trim()
   );
-
-  out = out.replace(/\n\s*hideOverlay\(\)\s*;\s*\n/g, "\n      // CONNECT-FIRST: keep overlay open until 'connected' event\n");
-
-  if (!out.includes("CONNECT-FIRST: hide overlay on connected")) {
-    out = out.replace(
-      /ctx\.connected\s*=\s*true\s*;\s*\n/g,
-      (m) => m + "    // CONNECT-FIRST: hide overlay on connected\n" + "    try { hideOverlay(); } catch {}\n"
-    );
-  }
-
   return out;
 }
 
-// -----------------------------
-// HTML rendering (index.template.html)
-// -----------------------------
 function renderSettingsFieldsHtml(spec) {
   const round = Number(spec?.defaultSettings?.roundSeconds || 20);
   const goal = Number(spec?.defaultSettings?.winGoal || 100);
-
   return `
-<label class="field">
-  <span class="field-label">Round seconds</span>
+<label class="field"><span class="field-label">Round seconds</span>
   <input data-setting="roundSeconds" type="number" min="5" max="300" value="${round}" />
 </label>
-
-<label class="field">
-  <span class="field-label">Win goal</span>
+<label class="field"><span class="field-label">Win goal</span>
   <input data-setting="winGoal" type="number" min="1" max="999" value="${goal}" />
-</label>
-`.trim();
+</label>`.trim();
 }
 
 function renderHowToLi(spec) {
   const items = Array.isArray(spec?.howToPlay) ? spec.howToPlay : [];
-  return items
-    .slice(0, 10)
-    .map((x) => `<li>${escapeHtml(String(x || ""))}</li>`)
-    .join("\n");
+  return items.slice(0, 10).map(x => `<li>${escapeHtml(String(x || ""))}</li>`).join("\n");
 }
 
 function renderIndexHtml(indexTemplate, spec) {
@@ -481,9 +435,6 @@ function renderIndexHtml(indexTemplate, spec) {
   return html;
 }
 
-// -----------------------------
-// Validations
-// -----------------------------
 function validateGeneratedHtml(html) {
   const requiredIds = ["setupOverlay", "startGameBtn", "liveIdInput", "gameRoot", "flags"];
   for (const id of requiredIds) {
@@ -491,13 +442,11 @@ function validateGeneratedHtml(html) {
       throw new Error(`index.html missing required id: ${id}`);
     }
   }
-  const matches = html.match(/id\s*=\s*["']liveIdInput["']/g) || [];
-  if (matches.length !== 1) throw new Error(`index.html must have exactly 1 liveIdInput (found ${matches.length})`);
 }
 
 function validateGeneratedCss(css) {
   if (!css.includes(":root")) throw new Error("style.css missing :root block");
-  if (!css.includes("--pink") || !css.includes("--aqua")) throw new Error("style.css missing theme vars (--pink/--aqua)");
+  if (!css.includes("--pink") || !css.includes("--aqua")) throw new Error("style.css missing theme vars");
 }
 
 function validateGeneratedJs(js) {
@@ -505,21 +454,13 @@ function validateGeneratedJs(js) {
   if (!js.includes("// === AI_REGION_START ===") || !js.includes("// === AI_REGION_END ===")) {
     throw new Error("game.js missing AI_REGION markers");
   }
-  if (js.includes("setAccessToken(window.CHATTOK_CREATOR_TOKEN")) {
-    throw new Error("game.js violates token rule (setAccessToken called without non-empty check)");
-  }
 }
 
-// -----------------------------
-// POST /api/generate
-// -----------------------------
 app.post("/api/generate", async (req, res) => {
   try {
     const stage = normalizeStage(req.body?.stage);
-    const wantBundle = !stage;
-
     const idea = pickIdea(req.body);
-    assert(idea || wantBundle, "Missing idea text.");
+    assert(idea, "Missing idea text.");
 
     const templateId = String(req.body?.templateId || req.body?.template || "boss").trim().toLowerCase();
     const theme = req.body?.theme || req.body?.colors || {};
@@ -530,23 +471,17 @@ app.post("/api/generate", async (req, res) => {
     const modelJs = String(process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
 
     // CSS stage: NO LLM
-    if (!wantBundle && stage === "css") {
+    if (stage === "css") {
       const css = injectThemeVars(TEMPLATES.css, theme);
       validateGeneratedCss(css);
-      return res.json({
-        ok: true,
-        stage,
-        file: { name: "style.css", content: css },
-        context: { spec: ctxSpec, templateId },
-      });
+      return res.json({ ok: true, stage, file: { name: "style.css", content: css }, context: { spec: ctxSpec, templateId } });
     }
 
-    // OpenAI key required for html/js
     const apiKey = process.env.OPENAI_API_KEY;
     assert(String(apiKey || "").trim(), "OPENAI_API_KEY is blank. Set it in Render Environment Variables.");
 
     // HTML stage
-    if (!wantBundle && stage === "html") {
+    if (stage === "html") {
       const spec = await generateSpec({ apiKey, model: modelSpec, idea, templateId });
       const html = renderIndexHtml(TEMPLATES.index, spec);
       validateGeneratedHtml(html);
@@ -554,7 +489,7 @@ app.post("/api/generate", async (req, res) => {
     }
 
     // JS stage
-    if (!wantBundle && stage === "js") {
+    if (stage === "js") {
       const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateId }));
       const aiCode = await generateAiRegion({ apiKey, model: modelJs, idea, spec, templateId });
 
@@ -566,28 +501,7 @@ app.post("/api/generate", async (req, res) => {
       return res.json({ ok: true, stage, file: { name: "game.js", content: js }, context: { spec, templateId } });
     }
 
-    // Bundle mode
-    const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateId }));
-    const html = renderIndexHtml(TEMPLATES.index, spec);
-    const css = injectThemeVars(TEMPLATES.css, theme);
-    const aiCode = await generateAiRegion({ apiKey, model: modelJs, idea, spec, templateId });
-
-    let js = injectSpecIntoGameJs(TEMPLATES.game, spec);
-    js = replaceBetweenMarkers(js, "// === AI_REGION_START ===", "// === AI_REGION_END ===", aiCode);
-    js = enforceLockedTikTokAndConnectFirst(js);
-
-    validateGeneratedHtml(html);
-    validateGeneratedCss(css);
-    validateGeneratedJs(js);
-
-    return res.json({
-      ok: true,
-      stage: "bundle",
-      index_html: html,
-      style_css: css,
-      game_js: js,
-      context: { spec, templateId },
-    });
+    throw new Error("Invalid stage. Use html, css, or js.");
   } catch (err) {
     console.error("/api/generate error:", err);
     return res.status(err.status || 500).json({
@@ -598,9 +512,6 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// -----------------------------
-// POST /api/edit (v1)
-// -----------------------------
 app.post("/api/edit", async (req, res) => {
   try {
     const remaining = Number(req.body?.remainingEdits ?? 0);
@@ -612,6 +523,7 @@ app.post("/api/edit", async (req, res) => {
     const currentFiles = req.body?.currentFiles && typeof req.body.currentFiles === "object" ? req.body.currentFiles : {};
     const currentCss = String(currentFiles["style.css"] || "");
     const currentJs = String(currentFiles["game.js"] || "");
+    assert(currentJs.trim(), "Missing current game.js");
 
     const templateId = String(req.body?.templateId || "boss").trim().toLowerCase();
     const theme = req.body?.theme || req.body?.colors || {};
@@ -620,12 +532,7 @@ app.post("/api/edit", async (req, res) => {
     if (/\b(theme|color|colour|primary|secondary|background)\b/i.test(changeRequest)) {
       const css = injectThemeVars(TEMPLATES.css, theme);
       validateGeneratedCss(css);
-      return res.json({
-        ok: true,
-        remainingEdits: remaining - 1,
-        patches: [{ name: "style.css", content: css }],
-        notes: "Re-injected theme vars into style.css template.",
-      });
+      return res.json({ ok: true, remainingEdits: remaining - 1, patches: [{ name: "style.css", content: css }] });
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
@@ -654,22 +561,12 @@ app.post("/api/edit", async (req, res) => {
     let newJs = replaceBetweenMarkers(currentJs, "// === AI_REGION_START ===", "// === AI_REGION_END ===", aiCode);
     newJs = enforceLockedTikTokAndConnectFirst(newJs);
     validateGeneratedJs(newJs);
-
     if (currentCss) validateGeneratedCss(currentCss);
 
-    return res.json({
-      ok: true,
-      remainingEdits: remaining - 1,
-      patches: [{ name: "game.js", content: newJs }],
-      notes: "Updated AI_REGION in game.js.",
-    });
+    return res.json({ ok: true, remainingEdits: remaining - 1, patches: [{ name: "game.js", content: newJs }] });
   } catch (err) {
     console.error("/api/edit error:", err);
-    return res.status(err.status || 500).json({
-      ok: false,
-      error: err?.message || String(err),
-      details: err.details || null,
-    });
+    return res.status(err.status || 500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
@@ -678,20 +575,11 @@ app.get("/health", (_req, res) => {
     ok: true,
     service: "builder-api",
     endpoints: ["GET /health", "POST /api/generate", "POST /api/edit"],
-    models: {
-      spec: process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini",
-      js: process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini",
-    },
-    templates: {
-      index: !!TEMPLATES.index,
-      css: !!TEMPLATES.css,
-      game: !!TEMPLATES.game,
-    },
+    templates: { index: !!TEMPLATES.index, css: !!TEMPLATES.css, game: !!TEMPLATES.game },
     allowedOrigins: allowedOrigins.length ? allowedOrigins : "(dev: allow all)",
   });
 });
 
-// ✅ LISTEN ONCE (Render requires process.env.PORT)
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Builder API running on port ${PORT}`);

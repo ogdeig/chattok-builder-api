@@ -1,5 +1,4 @@
-const PORT = process.env.PORT || 3000;
-app.listen(PORT);
+
 const express = require("express");
 const cors = require("cors");
 const fs = require("fs");
@@ -17,8 +16,8 @@ require("dotenv").config();
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
-const PORT = Number(process.env.PORT || 8787);
-const HOST = process.env.HOST || "127.0.0.1";
+const PORT = process.env.PORT || 3000;
+app.listen(PORT);
 
 // Node 18+ required for global fetch (OpenAI)
 if (typeof fetch !== "function") {

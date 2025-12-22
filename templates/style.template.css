@@ -1,43 +1,33 @@
-/* =========================================================
-   style.template.css — ChatTok Game Template (production-ready)
-   MUST support:
-   - ChatTokGaming preview (iframe/srcdoc + base href quirks)
-   - Clear 9:16 gameplay viewport + readable HUD
-   - Non-blocking “flag” notifications (chat/gift)
-   - Theme injection from API (server replaces --pink/--aqua/--bg)
-
-   NOTE:
-   This file intentionally contains NO external imports.
-   ========================================================= */
+/* style.template.css — ChatTok Game Template (9:16 + overlay + flags)
+   ================================================================
+   IMPORTANT:
+   - Server injects theme colors by replacing --pink / --aqua / --bg in :root.
+   - Keep these vars present and named exactly.
+*/
 
 :root{
-  /* Theme (API can replace these) */
   --pink:#ff0050;
   --aqua:#00f2ea;
   --bg:#000000;
 
-  /* Surfaces */
-  --bg0:#060812;
-  --bg1:#0b1022;
-  --panel: rgba(255,255,255,.07);
-  --panel2: rgba(255,255,255,.04);
-  --line: rgba(255,255,255,.12);
+  --bg0: color-mix(in srgb, var(--bg) 72%, #0b1022 28%);
+  --bg1: color-mix(in srgb, var(--bg) 55%, #090b14 45%);
 
-  /* Text */
   --text:#f7f7fb;
   --muted: rgba(247,247,251,.72);
 
-  /* Status */
+  --panel: rgba(255,255,255,.06);
+  --panel2: rgba(255,255,255,.04);
+  --line: rgba(255,255,255,.12);
+
   --good:#2ee59d;
   --bad:#ff4d4d;
   --warn:#ffb347;
 
-  /* Radius / shadow */
+  --shadow: 0 18px 54px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
   --r: 18px;
   --r2: 14px;
-  --shadowPanel: 0 16px 46px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
 
-  /* Fonts */
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
 }
 
@@ -45,107 +35,150 @@
 html,body{ height:100%; }
 body{
   margin:0;
-  color:var(--text);
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: var(--text);
   background:
-    radial-gradient(1200px 720px at 18% 12%, rgba(255,0,80,.18), transparent 60%),
-    radial-gradient(950px 650px at 86% 22%, rgba(0,242,234,.12), transparent 55%),
+    radial-gradient(1100px 700px at 16% 14%, color-mix(in srgb, var(--pink) 22%, transparent), transparent 62%),
+    radial-gradient(900px 650px at 86% 18%, color-mix(in srgb, var(--aqua) 16%, transparent), transparent 60%),
     linear-gradient(180deg, var(--bg0), var(--bg1));
-  overflow:hidden;
+  overflow-x:hidden;
 }
 
-#app{ height:100%; }
+/* Subtle animated glow behind everything */
+body:before{
+  content:"";
+  position: fixed;
+  inset:-120px;
+  pointer-events:none;
+  z-index:-1;
+  background:
+    radial-gradient(520px 520px at 20% 30%, color-mix(in srgb, var(--pink) 18%, transparent), transparent 70%),
+    radial-gradient(620px 620px at 78% 24%, color-mix(in srgb, var(--aqua) 14%, transparent), transparent 72%);
+  filter: blur(22px);
+  opacity:.75;
+  animation: drift 9.5s ease-in-out infinite alternate;
+}
+@keyframes drift{
+  from{ transform: translate3d(-10px,-6px,0) scale(1.02); }
+  to  { transform: translate3d(14px,10px,0) scale(1.08); }
+}
+
+#app{
+  min-height: 100vh;
+}
 
 /* ===============================
-   Overlay (Setup)
+   Overlay
    =============================== */
-
 .overlay{
   position: fixed;
-  inset: 0;
+  inset:0;
   display:flex;
   align-items:center;
   justify-content:center;
-  padding: 18px;
-  background: rgba(0,0,0,.62);
+  padding: 18px 14px;
+  background: rgba(0,0,0,.55);
   backdrop-filter: blur(10px);
   z-index: 50;
 }
 
 .overlay-card{
-  width: min(760px, 100%);
-  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
+  width: min(980px, 96vw);
+  background: linear-gradient(180deg, var(--panel), var(--panel2));
   border: 1px solid var(--line);
   border-radius: var(--r);
-  box-shadow: var(--shadowPanel);
-  padding: 18px;
+  box-shadow: var(--shadow);
+  padding: 16px 14px 14px;
+  overflow:hidden;
+  position: relative;
+}
+
+.overlay-card:before{
+  content:"";
+  position:absolute;
+  inset:-2px;
+  background:
+    radial-gradient(720px 420px at 18% 12%, color-mix(in srgb, var(--pink) 22%, transparent), transparent 60%),
+    radial-gradient(720px 420px at 86% 18%, color-mix(in srgb, var(--aqua) 18%, transparent), transparent 62%);
+  opacity:.35;
+  pointer-events:none;
 }
 
 .title{
-  margin:0;
-  font-size: 26px;
+  margin: 0 0 2px;
+  font-size: 22px;
   font-weight: 950;
   letter-spacing:.2px;
-  text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 0 18px rgba(255,0,80,.22);
+  text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 0 18px color-mix(in srgb, var(--pink) 26%, transparent);
+  position: relative;
 }
-
 .subtitle{
-  margin: 6px 0 0;
+  margin: 0 0 12px;
   color: var(--muted);
-  font-weight: 800;
-  letter-spacing:.2px;
+  font-size: 13.5px;
+  position: relative;
 }
 
 .form-grid{
-  margin-top: 14px;
   display:grid;
   grid-template-columns: 1fr 1fr;
   gap: 10px;
+  margin: 10px 0 12px;
+  position: relative;
+}
+@media (max-width: 720px){
+  .form-grid{ grid-template-columns: 1fr; }
 }
 
-.field{ display:flex; flex-direction:column; gap: 6px; }
+.field{
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  padding: 10px;
+  border-radius: var(--r2);
+  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.22);
+}
 .field-span{ grid-column: 1 / -1; }
 
 .field-label{
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
   letter-spacing:.6px;
   text-transform: uppercase;
-  color: rgba(247,247,251,.86);
-  font-weight: 950;
-  text-shadow: 0 1px 0 rgba(0,0,0,.35);
+  color: rgba(247,247,251,.66);
 }
 
-input, textarea{
+input[type="text"], input[type="number"]{
   width:100%;
   border-radius: 14px;
   border: 1px solid rgba(255,255,255,.12);
   background: rgba(0,0,0,.26);
   color: rgba(247,247,251,.92);
   padding: 12px 12px;
+  outline: none;
   font-family: var(--mono);
-  outline:none;
 }
-input::placeholder, textarea::placeholder{ color: rgba(247,247,251,.55); }
-input:focus, textarea:focus{
-  border-color: rgba(0,242,234,.45);
+input::placeholder{ color: rgba(247,247,251,.55); }
+input:focus{
+  border-color: rgba(0,242,234,.35);
   box-shadow: 0 0 0 3px rgba(0,242,234,.12);
 }
 
 .primary-btn{
-  margin-top: 12px;
   width:100%;
-  border: 0;
+  border:0;
   cursor:pointer;
   padding: 13px 14px;
   border-radius: 14px;
   font-weight: 950;
   letter-spacing:.2px;
   color: #0b0b0b;
-  background: linear-gradient(180deg, rgba(0,242,234,.95), rgba(255,0,80,.95));
+  background: linear-gradient(180deg, color-mix(in srgb, var(--aqua) 92%, white 8%), color-mix(in srgb, var(--pink) 92%, white 8%));
   box-shadow: 0 14px 26px rgba(255,0,80,.12), 0 7px 0 rgba(0,0,0,.35);
   transform: translateY(0);
   transition: transform .08s ease, box-shadow .08s ease, filter .15s ease, opacity .15s ease;
-  user-select:none;
+  position: relative;
 }
 .primary-btn:hover{ filter: brightness(1.04); }
 .primary-btn:active{
@@ -160,351 +193,271 @@ input:focus, textarea:focus{
 
 .status-line{
   margin: 10px 0 0;
-  color: rgba(247,247,251,.78);
+  color: rgba(247,247,251,.76);
   font-size: 13px;
+  font-family: var(--mono);
+  position: relative;
 }
 
 .hint{
   margin-top: 12px;
   padding: 12px;
-  border-radius: 14px;
+  border-radius: var(--r2);
   border: 1px solid rgba(255,255,255,.10);
   background: rgba(0,0,0,.18);
+  position: relative;
 }
 .hint-title{
   font-weight: 950;
   letter-spacing:.2px;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
+  text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 0 12px color-mix(in srgb, var(--aqua) 18%, transparent);
 }
 .hint-sub{
-  color: rgba(247,247,251,.82);
   font-size: 13px;
   line-height: 1.35;
+  color: rgba(247,247,251,.86);
 }
-.hint-sub.muted{ color: rgba(247,247,251,.65); }
+.hint-sub.muted{ color: var(--muted); }
 .hint-list{
   margin: 8px 0 0;
   padding-left: 18px;
-  color: rgba(247,247,251,.78);
+  color: rgba(247,247,251,.86);
   font-size: 13px;
   line-height: 1.35;
 }
-
-@media (max-width: 560px){
-  .form-grid{ grid-template-columns: 1fr; }
-}
+.hint-list li{ margin: 4px 0; }
 
 /* ===============================
    Game Screen Layout
    =============================== */
-
 .game-screen{
-  position: relative;
-  height:100%;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  padding: 16px;
+  min-height: 100vh;
+  padding: 14px 12px 18px;
 }
 
 .game-wrapper{
-  width: min(1100px, 100%);
-  height: 100%;
-  max-height: calc(100vh - 32px);
+  max-width: 1320px;
+  margin: 0 auto;
   display:flex;
   flex-direction:column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .topbar{
   display:flex;
-  align-items:flex-end;
+  align-items:center;
   justify-content:space-between;
-  gap: 12px;
+  gap: 10px;
   padding: 12px 12px;
   border-radius: var(--r);
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
-  box-shadow: 0 12px 30px rgba(0,0,0,.28);
+  background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.18));
+  box-shadow: 0 12px 36px rgba(0,0,0,.40);
 }
 
+.topbar-left{ display:flex; flex-direction:column; gap:2px; }
 .game-name{
-  font-size: 16px;
   font-weight: 950;
   letter-spacing:.2px;
-  text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 0 14px rgba(0,242,234,.14);
+  text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 0 14px color-mix(in srgb, var(--pink) 20%, transparent);
 }
 .game-sub{
-  margin-top: 2px;
-  font-size: 12px;
+  font-size: 12.5px;
   color: var(--muted);
-  font-weight: 800;
-  letter-spacing:.2px;
 }
 
 .pill{
   display:inline-flex;
   align-items:center;
-  gap: 6px;
+  gap:8px;
   padding: 8px 10px;
   border-radius: 999px;
   border: 1px solid rgba(255,255,255,.12);
   background: rgba(0,0,0,.22);
-  color: rgba(247,247,251,.84);
+  color: rgba(247,247,251,.86);
   font-size: 12.5px;
   font-family: var(--mono);
 }
 
-.status-text{ font-weight: 900; }
+.status-text{ color: rgba(247,247,251,.92); }
 
 .layout{
-  flex: 1 1 auto;
   display:grid;
-  grid-template-columns: 1fr 300px;
-  gap: 10px;
-  min-height: 0;
+  grid-template-columns: 1fr 320px;
+  gap: 12px;
+}
+@media (max-width: 980px){
+  .layout{ grid-template-columns: 1fr; }
 }
 
+/* Main 9:16 stage container */
 .main{
   border-radius: var(--r);
   border: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
-  box-shadow: var(--shadowPanel);
-  overflow:hidden;
-  min-height: 0;
-}
-
-.viewport{
-  height:100%;
-  display:flex;
-  flex-direction:column;
-  background:
-    radial-gradient(820px 520px at 15% 15%, rgba(255,0,80,.16), transparent 60%),
-    radial-gradient(760px 540px at 88% 18%, rgba(0,242,234,.12), transparent 58%),
-    linear-gradient(180deg, rgba(0,0,0,.20), rgba(0,0,0,.10));
-}
-
-/* safe-area spacers */
-.safe-top{ height: 10px; flex: 0 0 auto; }
-.safe-bottom{ height: 10px; flex: 0 0 auto; }
-
-/* 9:16 game root */
-.game-root{
-  flex: 1 1 auto;
-  display:flex;
-  align-items:center;
-  justify-content:center;
-  padding: 10px;
-  min-height: 0;
-}
-
-/* The actual game canvas/scene (created by game.js) can use this as a container */
-.game-stage{
-  width: min(520px, 100%);
-  aspect-ratio: 9 / 16;
-  border-radius: 18px;
-  border: 1px solid rgba(255,255,255,.12);
-  background:
-    radial-gradient(600px 420px at 50% 35%, rgba(255,255,255,.06), transparent 60%),
-    linear-gradient(180deg, rgba(0,0,0,.30), rgba(0,0,0,.12));
-  box-shadow: 0 18px 40px rgba(0,0,0,.45);
+  background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.20));
+  box-shadow: var(--shadow);
   overflow:hidden;
   position: relative;
 }
 
-/* Right side */
+/* The viewport keeps 9:16 look but can scale */
+.viewport{
+  width: 100%;
+  /* keep it tall on desktop while fitting */
+  aspect-ratio: 9 / 16;
+  max-height: calc(100vh - 190px);
+  margin: 0 auto;
+  position: relative;
+  overflow:hidden;
+  background:
+    radial-gradient(900px 700px at 50% 0%, rgba(255,255,255,.08), transparent 60%),
+    radial-gradient(700px 700px at 18% 18%, color-mix(in srgb, var(--pink) 14%, transparent), transparent 60%),
+    radial-gradient(700px 700px at 86% 18%, color-mix(in srgb, var(--aqua) 12%, transparent), transparent 60%),
+    linear-gradient(180deg, rgba(0,0,0,.15), rgba(0,0,0,.32));
+}
+
+/* If the screen is very wide, allow viewport to be a bit taller */
+@media (min-width: 1200px){
+  .viewport{ max-height: calc(100vh - 170px); }
+}
+
+/* safe areas for notch-like spacing */
+.safe-top, .safe-bottom{
+  position:absolute;
+  left:0; right:0;
+  height: env(safe-area-inset-top, 0px);
+  pointer-events:none;
+}
+.safe-bottom{
+  top:auto;
+  bottom:0;
+  height: env(safe-area-inset-bottom, 0px);
+}
+
+.game-root{
+  position:absolute;
+  inset:0;
+}
+
+/* Side panel */
 .side{
-  min-height: 0;
-  display:flex;
-  flex-direction:column;
+  border-radius: var(--r);
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(0,0,0,.20));
+  box-shadow: var(--shadow);
+  overflow:hidden;
 }
 
 .side-card{
-  flex: 1 1 auto;
-  border-radius: var(--r);
-  border: 1px solid var(--line);
-  background: linear-gradient(180deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
-  box-shadow: var(--shadowPanel);
-  overflow:hidden;
+  height: 100%;
   display:flex;
   flex-direction:column;
-  min-height: 0;
 }
-
 .side-title{
   padding: 12px 12px 10px;
   font-weight: 950;
   letter-spacing:.2px;
   border-bottom: 1px solid rgba(255,255,255,.08);
-  background: linear-gradient(180deg, rgba(255,255,255,.06), transparent);
+  text-shadow: 0 2px 0 rgba(0,0,0,.35), 0 0 12px color-mix(in srgb, var(--aqua) 18%, transparent);
 }
-
-.flags{
-  position: relative;
-  flex: 1 1 auto;
-  padding: 12px;
-  min-height: 0;
-  overflow: hidden; /* we animate flags in/out */
-}
-
 .side-foot{
-  padding: 10px 12px;
+  padding: 10px 12px 12px;
   border-top: 1px solid rgba(255,255,255,.08);
-  color: rgba(247,247,251,.65);
-  font-size: 12px;
-}
-
-.footer-text{
-  text-align:center;
-  color: rgba(247,247,251,.62);
+  color: var(--muted);
   font-size: 12.5px;
-  padding-bottom: 6px;
+}
+.flags{
+  flex: 1 1 auto;
+  padding: 10px;
+  display:flex;
+  flex-direction:column;
+  gap: 10px;
+  overflow:hidden;
 }
 
-/* Responsive: on narrow screens, stack side under main */
-@media (max-width: 980px){
-  .layout{ grid-template-columns: 1fr; }
-  .side-card{ max-height: 220px; }
-}
-
-/* ===============================
-   Flag notifications (chat/gift)
-   Game JS should add .flag elements into #flags
-   =============================== */
-
+/* Flag styles (pop-out notifications) */
 .flag{
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  top: 12px;
   display:flex;
   gap: 10px;
   align-items:center;
-  padding: 10px 12px;
   border-radius: 16px;
-  border: 1px solid rgba(255,255,255,.14);
-  background: rgba(0,0,0,.26);
-  box-shadow: 0 14px 28px rgba(0,0,0,.35);
-  backdrop-filter: blur(8px);
-  transform: translateX(110%);
+  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(0,0,0,.22);
+  box-shadow: 0 14px 26px rgba(0,0,0,.35);
+  padding: 10px 10px;
+  transform: translateX(28px);
   opacity: 0;
-  pointer-events:none;
+  animation: flagIn .18s ease forwards, flagOut .22s ease forwards;
+  animation-delay: 0ms, 4.0s;
 }
-
-.flag.show{
-  animation: flagInOut 3.4s ease-in-out forwards;
+@keyframes flagIn{
+  to{ transform: translateX(0); opacity: 1; }
 }
-
-@keyframes flagInOut{
-  0%   { transform: translateX(110%); opacity: 0; }
-  12%  { transform: translateX(0%);   opacity: 1; }
-  82%  { transform: translateX(0%);   opacity: 1; }
-  100% { transform: translateX(110%); opacity: 0; }
+@keyframes flagOut{
+  to{ transform: translateX(22px); opacity: 0; }
 }
 
 .flag .pfp{
-  width: 38px;
-  height: 38px;
-  border-radius: 14px;
-  border: 1px solid rgba(255,255,255,.14);
-  background: rgba(255,255,255,.06);
-  overflow:hidden;
+  width: 36px;
+  height: 36px;
+  border-radius: 12px;
   flex: 0 0 auto;
-  box-shadow: 0 12px 20px rgba(0,0,0,.25);
-}
-.flag .pfp img{
-  width:100%;
-  height:100%;
+  border: 1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.08);
   object-fit: cover;
-  display:block;
 }
-
 .flag .txt{
   min-width:0;
   display:flex;
   flex-direction:column;
   gap: 2px;
 }
-.flag .who{
+.flag .line1{
   font-weight: 950;
-  letter-spacing:.2px;
-  color: rgba(247,247,251,.92);
-  white-space: nowrap;
+  font-size: 13px;
+  white-space:nowrap;
   overflow:hidden;
   text-overflow: ellipsis;
 }
-.flag .msg{
-  font-size: 13px;
-  color: rgba(247,247,251,.80);
-  line-height: 1.25;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow:hidden;
-}
-
-.flag.is-chat{ border-color: rgba(0,242,234,.22); }
-.flag.is-gift{ border-color: rgba(255,0,80,.26); }
-.flag.is-like{ border-color: rgba(255,255,255,.18); }
-
-/* Optional: team color or action coloring */
-.flag.tint-pink{  background: rgba(255,0,80,.18); }
-.flag.tint-aqua{  background: rgba(0,242,234,.14); }
-.flag.tint-dark{  background: rgba(0,0,0,.30); }
-
-/* ===============================
-   Mini “HUD” helpers (game.js can reuse)
-   =============================== */
-
-.hud{
-  position:absolute;
-  inset: 0;
-  pointer-events:none;
-}
-.hud-top{
-  position:absolute;
-  top: 10px; left: 10px; right: 10px;
-  display:flex;
-  justify-content:space-between;
-  gap:10px;
-}
-.hud-chip{
-  pointer-events:none;
-  padding: 8px 10px;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.12);
-  background: rgba(0,0,0,.22);
+.flag .line2{
+  font-size: 12.5px;
   color: rgba(247,247,251,.86);
-  font-family: var(--mono);
-  font-size: 12px;
-  box-shadow: 0 12px 24px rgba(0,0,0,.28);
   white-space:nowrap;
-}
-
-/* Energy meter */
-.meter{
-  position:absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 10px;
-  height: 14px;
-  border-radius: 999px;
-  border: 1px solid rgba(255,255,255,.12);
-  background: rgba(0,0,0,.22);
   overflow:hidden;
-  box-shadow: 0 12px 24px rgba(0,0,0,.28);
-}
-.meter > .fill{
-  height:100%;
-  width: 30%;
-  background: linear-gradient(90deg, rgba(0,242,234,.95), rgba(255,0,80,.95));
-  border-radius: 999px;
-  box-shadow: 0 0 18px rgba(0,242,234,.16);
-  transition: width .15s ease;
+  text-overflow: ellipsis;
+  font-family: var(--mono);
 }
 
-/* Reduce motion if requested */
+/* Theme-tinted flags (game.js uses these classes) */
+.tint-pink{
+  background: color-mix(in srgb, var(--pink) 16%, rgba(0,0,0,.22));
+  border-color: color-mix(in srgb, var(--pink) 34%, rgba(255,255,255,.12));
+}
+.tint-aqua{
+  background: color-mix(in srgb, var(--aqua) 14%, rgba(0,0,0,.22));
+  border-color: color-mix(in srgb, var(--aqua) 32%, rgba(255,255,255,.12));
+}
+.tint-warn{
+  background: rgba(255,179,71,.12);
+  border-color: rgba(255,179,71,.32);
+}
+.tint-good{
+  background: rgba(46,229,157,.12);
+  border-color: rgba(46,229,157,.32);
+}
+
+/* Footer */
+.footer-text{
+  text-align:center;
+  color: rgba(247,247,251,.58);
+  font-size: 12.5px;
+  padding: 4px 0 2px;
+  font-family: var(--mono);
+}
+
+/* Reduce motion support */
 @media (prefers-reduced-motion: reduce){
-  .flag.show{ animation: none; transform: translateX(0%); opacity: 1; }
-  .primary-btn{ transition: none; }
+  body:before{ animation: none; }
+  .flag{ animation: none; opacity:1; transform:none; }
 }

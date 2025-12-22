@@ -1,3 +1,12 @@
+<!-- index.template.html — ChatTok Game Template (index.html output)
+     ==============================================================
+     FIXES INCLUDED:
+     ✅ Stops style.css/game.js resolving to /style.css and /game.js
+     ✅ Stronger base-resolution for iframe/srcdoc runners
+     ✅ Does NOT request proto.bundle.js (prevents proto.bundle.js 404)
+     ✅ Never references `proto` directly (prevents "proto is not defined")
+     ✅ Does NOT load tiktok-client.js (platform provides it)
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6,43 +15,67 @@
   <title>{{TITLE}}</title>
 
   <!--
-    CRITICAL: iframe / srcdoc / SPA base-href path fix
-    -----------------------------------------------
-    In ChatTokGaming preview, games may run inside an iframe runner (sometimes srcdoc)
-    and the host page may set <base href="/"> which breaks relative paths, causing
-    requests like /style.css or /proto.bundle.js instead of ./style.css.
-    We set a local <base> derived from document.referrer (the runner page URL),
-    so ./style.css and ./game.js reliably resolve to the uploaded game folder.
+    Preview-safe BASE resolution:
+    Many hosts run games in iframe/srcdoc, and relative URLs may resolve to site root.
+    We set <base> to the best-known "game folder" URL.
+
+    Priority:
+    1) platform-injected globals (if they exist): CHATTOK_ASSET_BASE / CHATTOK_GAME_BASE / GAME_ASSET_BASE
+    2) document.referrer (best for srcdoc)
+    3) parent location (safe try/catch)
+    4) location.href fallback
   -->
   <script>
     (function () {
-      try {
-        // If a base tag already exists, do nothing.
-        if (document.querySelector("base")) return;
+      function tryParentHref() {
+        try {
+          if (window.parent && window.parent !== window && window.parent.location) {
+            return String(window.parent.location.href || "");
+          }
+        } catch (e) {}
+        return "";
+      }
 
-        var ref = document.referrer;
-        // Try parent location if accessible (some embeds allow it)
-        if (!ref) {
-          try { if (window.parent && window.parent.location) ref = window.parent.location.href; } catch(e){}
+      function normalizeDir(href) {
+        try {
+          var u = new URL(href);
+          return u.origin + u.pathname.replace(/[^\/]*$/, "");
+        } catch (e) {
+          return "";
         }
-        if (!ref) return;
+      }
 
-        var u = new URL(ref);
-        // Directory of the runner/game URL
-        var dir = u.origin + u.pathname.replace(/[^\/]*$/, "");
+      try {
+        // 1) Prefer platform-injected base if present (no assumptions about name)
+        var injected =
+          (typeof window.CHATTOK_ASSET_BASE !== "undefined" && window.CHATTOK_ASSET_BASE) ? String(window.CHATTOK_ASSET_BASE) :
+          (typeof window.CHATTOK_GAME_BASE !== "undefined" && window.CHATTOK_GAME_BASE) ? String(window.CHATTOK_GAME_BASE) :
+          (typeof window.GAME_ASSET_BASE !== "undefined" && window.GAME_ASSET_BASE) ? String(window.GAME_ASSET_BASE) :
+          "";
+
+        var ref = String(document.referrer || "");
+        var parentHref = tryParentHref();
+        var selfHref = String(location.href || "");
+
+        // If injected already looks like a directory URL, use it as-is. Otherwise normalize.
+        var baseHref = injected ? (injected.endsWith("/") ? injected : normalizeDir(injected)) : "";
+        if (!baseHref) baseHref = normalizeDir(ref) || normalizeDir(parentHref) || normalizeDir(selfHref);
+
+        if (!baseHref) return;
+
         var base = document.createElement("base");
-        base.href = dir;
+        base.href = baseHref;
         document.head.insertBefore(base, document.head.firstChild);
       } catch (e) {
-        // Never hard-fail; worst case relative paths behave as host dictates.
-        console.warn("Base-href fix failed:", e);
+        // no-op
       }
     })();
   </script>
 
-  <!-- Use explicit ./ to avoid root-path resolution in hostile base-href environments -->
+  <!-- IMPORTANT: use ./ so it never becomes /style.css due to host base rules -->
   <link rel="stylesheet" href="./style.css" />
 </head>
+
 <body>
   <div id="app">
 
@@ -50,191 +83,198 @@
          START / SETUP OVERLAY
          =============================== -->
     <div id="setupOverlay" class="overlay">
-      <div class="overlay-card">
-        <h1 class="title">{{TITLE}}</h1>
-        <p class="subtitle">{{SUBTITLE}}</p>
+      <div class="overlay-inner">
 
-        <!-- All setup inputs live in one consistent grid so nothing looks like a duplicate LIVE ID -->
-        <div class="form-grid" id="setupFields">
-
-          <label class="field field-span">
-            <span class="field-label">TikTok LIVE ID (username only)</span>
-            <input
-              id="liveIdInput"
-              type="text"
-              placeholder="username (without @)"
-              autocomplete="off"
-              autocapitalize="none"
-              spellcheck="false"
-            />
-          </label>
-
-          <!--
-            Server injects additional settings fields here.
-            RULE: Do NOT inject another TikTok LIVE ID field.
-          -->
-          {{SETTINGS_FIELDS_HTML}}
-
+        <div class="brand">
+          <div class="brandTitle">{{TITLE}}</div>
+          <div class="brandSub">{{SUBTITLE}}</div>
         </div>
 
-        <button id="startGameBtn" class="primary-btn">Connect &amp; Start Game</button>
+        <div class="panel">
+          <div class="panelTitle">Connect</div>
 
-        <p id="statusText" class="status-line">Not connected</p>
+          <label class="lbl">TikTok LIVE ID</label>
+          <input id="liveIdInput" type="text" placeholder="Example: huntbreaks" autocomplete="off" />
 
-        <div class="hint">
-          <div class="hint-title">How to play</div>
-          <div class="hint-sub">{{ONE_SENTENCE}}</div>
-          <ul class="hint-list">{{HOW_TO_PLAY_LI}}</ul>
-          <div class="hint-sub muted">
-            Tip: if connection fails, check your LIVE ID and token injection, then retry.
+          <!-- Settings fields live inside this container (required id) -->
+          <div id="setupFields" class="settings">
+            <div class="settingsTitle">Host Settings</div>
+
+            <!-- Commands are ALWAYS variables (host-configurable) -->
+            <div class="row2">
+              <div>
+                <label class="lbl">Join Command</label>
+                <input id="joinCommandInput" type="text" placeholder="join" autocomplete="off" />
+                <div class="miniHelp">Viewers can type this in chat to spawn/join.</div>
+              </div>
+              <div>
+                <label class="lbl">Action Command</label>
+                <input id="actionCommandInput" type="text" placeholder="attack" autocomplete="off" />
+                <div class="miniHelp">Viewers can type this to trigger the main action.</div>
+              </div>
+            </div>
+
+            <!-- Share fallback selector -->
+            <div class="row2">
+              <div class="toggle">
+                <input id="shareAsJoinToggle" type="checkbox" />
+                <label for="shareAsJoinToggle">Allow Shares to also count as Join</label>
+              </div>
+
+              <div class="toggle">
+                <input id="shareAsActionToggle" type="checkbox" />
+                <label for="shareAsActionToggle">Allow Shares to also count as Action</label>
+              </div>
+            </div>
+
+            <div class="adv">
+              <div class="advTitle">Advanced</div>
+
+              <div class="row2">
+                <div>
+                  <label class="lbl">Round Seconds</label>
+                  <input id="roundSecondsInput" type="text" placeholder="120" autocomplete="off" />
+                  <div class="miniHelp">How long one round lasts.</div>
+                </div>
+                <div>
+                  <label class="lbl">Win Goal</label>
+                  <input id="winGoalInput" type="text" placeholder="25" autocomplete="off" />
+                  <div class="miniHelp">Points / hits needed to win.</div>
+                </div>
+              </div>
+
+              <div class="row2">
+                <div class="toggle">
+                  <input id="enableSfxToggle" type="checkbox" checked />
+                  <label for="enableSfxToggle">Enable SFX</label>
+                </div>
+                <div class="toggle">
+                  <input id="enableTtsToggle" type="checkbox" />
+                  <label for="enableTtsToggle">Enable TTS (if game supports it)</label>
+                </div>
+              </div>
+
+              <div class="miniHelp muted">
+                Tip: If some viewers can’t be seen chatting, turn on Shares as Join/Action.
+              </div>
+            </div>
+          </div>
+
+          <button id="startGameBtn" class="primary-btn">Connect &amp; Start Game</button>
+
+          <p id="statusText" class="status-line">Not connected</p>
+
+          <!-- Preview environment diagnostics: NO URLs, no dev logs -->
+          <div id="envHint" class="envHint" aria-live="polite"></div>
+
+          <div class="hint">
+            <div class="hint-title">How to play</div>
+            <div class="hint-sub">{{ONE_SENTENCE}}</div>
+            <ul class="hint-list" id="howToPlayList"></ul>
           </div>
         </div>
 
-        <!-- Friendly platform checks (no crashes, no 404 spam) -->
-        <div class="hint" style="margin-top:12px">
-          <div class="hint-title">Platform checks</div>
-          <div id="platformChecks" class="hint-sub muted">Checking…</div>
-        </div>
       </div>
     </div>
 
     <!-- ===============================
          GAME SCREEN (9:16 VIEWPORT)
          =============================== -->
-    <div id="gameScreen" class="game-screen">
+    <div id="gameScreen" class="game-screen" aria-hidden="true">
       <div class="game-wrapper">
-
         <header class="topbar">
           <div class="topbar-left">
             <div class="game-name">{{TITLE}}</div>
             <div class="game-sub">{{SUBTITLE}}</div>
           </div>
+
           <div class="topbar-right">
-            <span class="pill">Status: <span id="statusTextInGame" class="status-text">Disconnected</span></span>
+            <div class="pill">
+              <div class="pill-k">STATUS</div>
+              <div class="pill-v" id="statusTextInGame">Disconnected</div>
+            </div>
+
+            <div class="pill">
+              <div class="pill-k">ROUND</div>
+              <div class="pill-v" id="roundLabel">1</div>
+            </div>
+
+            <div class="pill">
+              <div class="pill-k">HYPE</div>
+              <div class="pill-v" id="hypeLabel">0%</div>
+            </div>
           </div>
         </header>
 
-        <main class="layout">
-          <section class="main">
-            <div class="viewport">
-              <div class="safe-top"></div>
-              <div id="gameRoot" class="game-root">
-                <!-- game.js renders here -->
-              </div>
-              <div class="safe-bottom"></div>
-            </div>
-          </section>
+        <main id="gameRoot" class="stage" role="application" aria-label="Game Stage"></main>
 
-          <aside class="side">
-            <div class="side-card">
-              <div class="side-title">Live Events</div>
-              <div id="flags" class="flags"></div>
-              <div class="side-foot">Chat / likes / gifts pop here.</div>
-            </div>
-          </aside>
-        </main>
-
-        <footer class="footer-text">
-          Connection: <span id="statusTextFooter" class="status-text">Disconnected</span>
-        </footer>
+        <!-- Optional containers: styled by CSS; behavior decided by game.js/spec -->
+        <div id="flags" class="flags" aria-live="polite" aria-label="Live Notifications"></div>
+        <div id="centerBanner" class="centerBanner hide"></div>
       </div>
     </div>
 
   </div>
 
-  <!--
-    PROTO CONTRACT (CRITICAL)
-    ========================
-    We DO NOT load proto.bundle.js here.
-    Reason: In ChatTokGaming preview, the platform may inject proto automatically.
-    If we guess a path and it’s wrong, it causes proto.bundle.js 404 spam.
-
-    Instead:
-    - We check if window.proto exists before enabling "Connect & Start Game".
-    - We check if TikTokClient exists (platform-provided tiktok-client.js).
-    - If either is missing, we show a friendly message and disable start.
-
-    This satisfies:
-    ✅ No proto.bundle.js 404 caused by our generated HTML
-    ✅ No "proto is not defined" thrown by *our* code
-    And it allows the platform-injected stack to work correctly.
-  -->
   <script>
     (function () {
-      function $(id){ return document.getElementById(id); }
+      try {
+        var list = document.getElementById("howToPlayList");
+        if (!list) return;
 
-      var checksEl = $("platformChecks");
-      var startBtn = $("startGameBtn");
-      var statusText = $("statusText");
+        var items = {{HOW_TO_PLAY_JSON}};
+        if (!Array.isArray(items)) items = [];
+        if (!items.length) items = ["Type the Join command to spawn in.", "Use chat / likes / gifts to power up the action."];
 
-      function setStartEnabled(on){
-        if (!startBtn) return;
-        startBtn.disabled = !on;
-        startBtn.style.opacity = on ? "1" : "0.6";
-        startBtn.style.cursor = on ? "pointer" : "not-allowed";
-      }
-
-      function runChecks(){
-        try{
-          var hasTikTokClient = (typeof TikTokClient !== "undefined");
-          var hasProto = (typeof window !== "undefined" && typeof window.proto !== "undefined" && window.proto);
-
-          // Some environments might attach proto on globalThis
-          if (!hasProto && typeof globalThis !== "undefined" && globalThis.proto) hasProto = true;
-
-          var lines = [];
-          lines.push(hasTikTokClient ? "✅ TikTok client found" : "❌ TikTok client missing (tiktok-client.js not injected)");
-          lines.push(hasProto ? "✅ proto found" : "❌ proto missing (platform must inject proto bundle)");
-
-          if (checksEl) checksEl.textContent = lines.join(" • ");
-
-          if (hasTikTokClient && hasProto){
-            setStartEnabled(true);
-            return true;
-          } else {
-            setStartEnabled(false);
-            if (statusText) statusText.textContent = "Waiting for platform scripts…";
-            return false;
-          }
-        }catch(e){
-          setStartEnabled(false);
-          if (checksEl) checksEl.textContent = "Checks failed.";
-          return false;
+        list.innerHTML = "";
+        for (var i = 0; i < items.length; i++) {
+          var li = document.createElement("li");
+          li.textContent = String(items[i] || "");
+          list.appendChild(li);
         }
-      }
-
-      // Disable start until checks pass
-      setStartEnabled(false);
-
-      // Run now and a few times shortly after load (injection may be async)
-      runChecks();
-      var tries = 0;
-      var t = setInterval(function(){
-        tries++;
-        if (runChecks() || tries >= 20) clearInterval(t);
-      }, 250);
-
-      // When user clicks start but checks fail, show friendly note (no errors)
-      if (startBtn){
-        startBtn.addEventListener("click", function(ev){
-          var ok = runChecks();
-          if (!ok){
-            ev.preventDefault();
-            ev.stopPropagation();
-            if (statusText) statusText.textContent =
-              "Missing platform scripts (proto / TikTok client). This game must run inside ChatTokGaming preview/live.";
-          }
-        }, true);
-      }
+      } catch (e) {}
     })();
   </script>
 
-  <!--
-    IMPORTANT:
-    - DO NOT include tiktok-client.js here (ChatTokGaming provides it in preview/live).
-    - DO NOT include proto.bundle.js here (platform contract).
-    - Only load our game logic.
-  -->
-  <script src="./game.js"></script>
+  <script>
+    (function () {
+      function setHint(msg) {
+        try {
+          var el = document.getElementById("envHint");
+          if (!el) return;
+          el.textContent = msg || "";
+        } catch (e) {}
+      }
+
+      function checkEnv() {
+        var hasTikTokClient = (typeof window.TikTokClient !== "undefined");
+        var hasProto = (typeof window.proto !== "undefined");
+
+        if (hasTikTokClient && hasProto) {
+          setHint("Platform ready. You can connect now.");
+          return;
+        }
+
+        if (!hasTikTokClient && !hasProto) {
+          setHint("Waiting for platform scripts (TikTok client + proto). This is normal in ChatTokGaming preview/live.");
+        } else if (!hasTikTokClient) {
+          setHint("Waiting for platform TikTok client. If running locally, this must be provided by the host.");
+        } else if (!hasProto) {
+          setHint("Waiting for platform proto bundle. If this persists, the host environment must inject proto.");
+        }
+      }
+
+      checkEnv();
+      var tries = 0;
+      var t = setInterval(function () {
+        tries++;
+        checkEnv();
+        if (tries >= 20) clearInterval(t);
+      }, 150);
+    })();
+  </script>
+
+  <!-- IMPORTANT: use ./ so it never becomes /game.js due to host base rules -->
+  <script src="./game.js" defer></script>
 </body>
 </html>

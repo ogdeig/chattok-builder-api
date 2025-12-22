@@ -1,48 +1,93 @@
-/* =========================================================
-   game.template.js (template-first, production-ready)
+/* game.js (template-first, production)
+   ============================================================
+   Non-Negotiables honored:
+   - DO NOT edit / bundle tiktok-client.js here (ChatTok injects it).
+   - DO NOT load proto.bundle.js here (index.html handles contract checks).
+   - Works in iframe/srcdoc runners (index.template.html sets <base>).
+   - Game shows action immediately even without TikTok connected.
+   - AI fills ONLY the AI_REGION between markers.
 
-   NON-NEGOTIABLES (aligned):
-   - Do NOT edit tiktok-client.js (platform-provided).
-   - Must eliminate proto runtime crashes: if proto missing, fail gracefully + keep demo running.
-   - Must run inside ChatTokGaming preview (iframe/srcdoc/base href quirks handled in HTML).
-   - Must be a REAL game immediately (animation + entities visible on load), even before TikTok connects.
-   - AI must only fill AI_REGION (server enforces), everything else stable for low cost.
+   THIS TEMPLATE ALSO BUILDS HOST SETTINGS FIELDS DYNAMICALLY
+   so “chat commands” (and optional Share-as-fallback) are always configurable.
+*/
 
-   FILE EXPECTATIONS:
-   - index.template.html provides these IDs:
-     setupOverlay, startGameBtn, liveIdInput, statusText, depStatus,
-     statusTextInGame, statusTextFooter, flags, gameRoot
-   ========================================================= */
-
-// Injected server-side (JSON object)
+// This constant is injected server-side.
 const SPEC = __SPEC_JSON__;
 
-/* =========================================================
-   DOM refs
-========================================================= */
+/* ---------------- DOM ---------------- */
 const setupOverlay = document.getElementById("setupOverlay");
+const gameScreen = document.getElementById("gameScreen");
+const liveIdInput = document.getElementById("liveIdInput");
 const startGameBtn = document.getElementById("startGameBtn");
-const liveIdInput  = document.getElementById("liveIdInput");
-
 const statusText = document.getElementById("statusText");
-const depStatus  = document.getElementById("depStatus");
-
-const statusTextInGame  = document.getElementById("statusTextInGame");
-const statusTextFooter  = document.getElementById("statusTextFooter");
-
-const flagsEl = document.getElementById("flags");
+const statusTextInGame = document.getElementById("statusTextInGame");
+const statusTextFooter = document.getElementById("statusTextFooter");
 const gameRoot = document.getElementById("gameRoot");
+const flagsEl = document.getElementById("flags");
+const setupFields = document.getElementById("setupFields");
 
-/* =========================================================
-   Small utilities (safe, stable)
-========================================================= */
-function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
-function rand(a, b){ return a + Math.random() * (b - a); }
-function now(){ return performance.now(); }
+/* ---------------- State ---------------- */
+let client = null;
+let pendingStart = false;
 
-function safeStr(v){ return (v === null || v === undefined) ? "" : String(v); }
-function escapeHtml(s){
-  return safeStr(s)
+const state = {
+  spec: SPEC || {},
+  settings: {},
+  connected: false,
+
+  counters: { likes: 0, gifts: 0, chats: 0, joins: 0, shares: 0 },
+  _lastLikeFlagAt: 0,
+
+  // engine
+  canvas: null,
+  ctx2d: null,
+  w: 0,
+  h: 0,
+  dpr: 1,
+  t0: performance.now(),
+  last: performance.now(),
+
+  // entities
+  stars: [],
+  particles: [],
+  floaters: [],
+  players: new Map(), // userId -> player
+  bots: [],
+  boss: null,
+
+  // gameplay meters
+  hype: 0,          // 0..1 filled by likes/shares (optionally)
+  hypeDecay: 0.015, // per second
+  hypePulse: 0,
+
+  // fx
+  shake: 0,
+  flash: 0
+};
+
+/* ============================================================
+   UI helpers
+   ============================================================ */
+function setStatus(text, ok) {
+  const msg = String(text || "");
+  if (statusText) statusText.textContent = msg;
+  if (statusTextInGame) statusTextInGame.textContent = msg;
+  if (statusTextFooter) statusTextFooter.textContent = msg;
+
+  if (statusText) statusText.style.color = ok ? "rgba(46,229,157,.95)" : "rgba(255,255,255,.82)";
+  if (statusTextInGame) statusTextInGame.style.color = ok ? "rgba(46,229,157,.95)" : "rgba(255,255,255,.92)";
+  if (statusTextFooter) statusTextFooter.style.color = ok ? "rgba(46,229,157,.95)" : "rgba(255,255,255,.92)";
+}
+
+function showOverlay() {
+  if (setupOverlay) setupOverlay.style.display = "flex";
+}
+function hideOverlay() {
+  if (setupOverlay) setupOverlay.style.display = "none";
+}
+
+function escapeHtml(s) {
+  return String(s || "")
     .replaceAll("&", "&amp;")
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
@@ -50,556 +95,911 @@ function escapeHtml(s){
     .replaceAll("'", "&#39;");
 }
 
-/* =========================================================
-   UI helpers
-========================================================= */
-function setStatus(msg, ok){
-  const t = safeStr(msg || "");
-  if (statusText) statusText.textContent = t;
-  if (statusTextInGame) statusTextInGame.textContent = ok ? "Connected" : t || "Disconnected";
-  if (statusTextFooter) statusTextFooter.textContent = ok ? "Connected" : t || "Disconnected";
+function flag({ who, msg, pfp, tint }) {
+  if (!flagsEl) return;
 
-  if (depStatus){
-    if (!ok && t) depStatus.textContent = t;
-  }
+  const el = document.createElement("div");
+  el.className = "flag " + (tint || "tint-aqua");
+
+  const img = document.createElement("img");
+  img.className = "pfp";
+  img.alt = "";
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.referrerPolicy = "no-referrer";
+  img.src =
+    pfp ||
+    "data:image/svg+xml;charset=utf-8," +
+      encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72">
+           <rect width="72" height="72" rx="14" fill="rgba(255,255,255,.10)"/>
+           <text x="50%" y="55%" text-anchor="middle" font-family="system-ui,Segoe UI,Roboto,Arial" font-size="28" fill="rgba(255,255,255,.75)">${escapeHtml(
+             initials(who)
+           )}</text>
+         </svg>`
+      );
+
+  const txt = document.createElement("div");
+  txt.className = "txt";
+  txt.innerHTML = `<div class="line1">${escapeHtml(who || "viewer")}</div>
+                   <div class="line2">${escapeHtml(msg || "")}</div>`;
+
+  el.appendChild(img);
+  el.appendChild(txt);
+
+  flagsEl.insertBefore(el, flagsEl.firstChild);
+
+  // cap list
+  const max = 8;
+  while (flagsEl.childElementCount > max) flagsEl.removeChild(flagsEl.lastChild);
 }
 
-function showOverlay(){
-  if (setupOverlay) setupOverlay.style.display = "flex";
-}
-function hideOverlay(){
-  if (setupOverlay) setupOverlay.style.display = "none";
-}
+/* Tiny “copyright-free” audio via WebAudio (no external assets) */
+let audioCtx = null;
+function beep(type) {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const t = audioCtx.currentTime;
 
-/* =========================================================
-   Flag notifications (right-side)
-   CSS expects:
-   .flag .pfp img, .flag .txt .who, .flag .txt .msg
-========================================================= */
-function pushFlag(kind, user, message, tint){
-  try{
-    if (!flagsEl) return;
+    const o = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
 
-    const wrap = document.createElement("div");
-    wrap.className = "flag " + (kind ? ("is-" + kind) : "is-chat") + (tint ? (" " + tint) : "");
-    wrap.style.top = "12px"; // always top; CSS anim handles slide
+    o.type = "sine";
+    g.gain.setValueAtTime(0.0001, t);
 
-    const pfp = document.createElement("div");
-    pfp.className = "pfp";
-    const img = document.createElement("img");
-    img.alt = "";
-    img.decoding = "async";
-    img.loading = "lazy";
-    img.src = (user && user.profilePictureUrl) ? user.profilePictureUrl : "";
-    pfp.appendChild(img);
-
-    const txt = document.createElement("div");
-    txt.className = "txt";
-    txt.innerHTML =
-      `<div class="who">${escapeHtml(user && (user.nickname || user.uniqueId || user.userId) || "Viewer")}</div>` +
-      `<div class="msg">${escapeHtml(message || "")}</div>`;
-
-    wrap.appendChild(pfp);
-    wrap.appendChild(txt);
-    flagsEl.prepend(wrap);
-
-    // cap
-    while (flagsEl.childElementCount > 6) flagsEl.removeChild(flagsEl.lastChild);
-
-    // animate
-    requestAnimationFrame(() => wrap.classList.add("show"));
-
-    // cleanup
-    setTimeout(() => { try { wrap.remove(); } catch{} }, 4200);
-  }catch(e){
-    console.warn("flag error", e);
-  }
-}
-
-/* =========================================================
-   Proto guard + fallback loader (no crashes)
-   We do NOT assume any specific "proto contract".
-   We:
-   1) prefer injected window.proto
-   2) if missing, attempt a small set of fallback script paths
-   3) if still missing, keep game in demo mode + friendly message
-========================================================= */
-function hasProto(){
-  try{
-    return !!(window.proto && window.proto.TikTok && window.proto.TikTok.Messages);
-  }catch{
-    return false;
-  }
-}
-
-function hasTikTokClient(){
-  return (typeof window.TikTokClient !== "undefined");
-}
-
-function loadScriptOnce(src){
-  return new Promise((resolve) => {
-    try{
-      // already loaded?
-      const existing = Array.from(document.scripts || []).find(s => s && s.src && s.src === src);
-      if (existing) return resolve(true);
-
-      const s = document.createElement("script");
-      s.src = src;
-      s.async = true;
-      s.onload = () => resolve(true);
-      s.onerror = () => resolve(false);
-      document.head.appendChild(s);
-    }catch{
-      resolve(false);
+    if (type === "join") {
+      o.frequency.setValueAtTime(330, t);
+      g.gain.exponentialRampToValueAtTime(0.16, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
+    } else if (type === "gift") {
+      o.frequency.setValueAtTime(220, t);
+      o.frequency.exponentialRampToValueAtTime(660, t + 0.10);
+      g.gain.exponentialRampToValueAtTime(0.20, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
+    } else if (type === "hit") {
+      o.frequency.setValueAtTime(520, t);
+      o.frequency.exponentialRampToValueAtTime(240, t + 0.08);
+      g.gain.exponentialRampToValueAtTime(0.18, t + 0.008);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
+    } else {
+      o.frequency.setValueAtTime(440, t);
+      g.gain.exponentialRampToValueAtTime(0.12, t + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
     }
+
+    o.connect(g);
+    g.connect(audioCtx.destination);
+
+    o.start(t);
+    o.stop(t + 0.30);
+  } catch (e) {
+    // ignore audio failures
+  }
+}
+
+function initials(name) {
+  const s = String(name || "").trim();
+  if (!s) return "?";
+  const parts = s.replace(/[^a-zA-Z0-9\s]/g, " ").trim().split(/\s+/).filter(Boolean);
+  const a = parts[0] ? parts[0][0] : "?";
+  const b = parts[1] ? parts[1][0] : "";
+  return (a + b).toUpperCase();
+}
+
+/* ============================================================
+   Settings Field Builder (Dynamic)
+   - If a command exists, it MUST be configurable.
+   - Optional: allow SHARE to trigger the same action as chat.
+   - Also supports “some viewers can’t chat” workaround.
+   ============================================================ */
+function ensureSettingField(def) {
+  if (!setupFields || !def || !def.id) return;
+  const exists = document.querySelector(`[data-setting="${CSS.escape(def.id)}"]`);
+  if (exists) return;
+
+  const wrap = document.createElement("label");
+  wrap.className = "field" + (def.span ? " field-span" : "");
+
+  const lab = document.createElement("span");
+  lab.className = "field-label";
+  lab.textContent = def.label || def.id;
+
+  wrap.appendChild(lab);
+
+  let input;
+  if (def.type === "select") {
+    input = document.createElement("select");
+    input.style.width = "100%";
+    input.style.borderRadius = "14px";
+    input.style.border = "1px solid rgba(255,255,255,.12)";
+    input.style.background = "rgba(0,0,0,.26)";
+    input.style.color = "rgba(247,247,251,.92)";
+    input.style.padding = "12px 12px";
+    input.style.outline = "none";
+    input.style.fontFamily = "var(--mono)";
+    (def.options || []).forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      input.appendChild(opt);
+    });
+    if (def.value != null) input.value = String(def.value);
+  } else if (def.type === "checkbox") {
+    input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!def.value;
+    input.style.transform = "scale(1.15)";
+    input.style.marginTop = "4px";
+  } else if (def.type === "number") {
+    input = document.createElement("input");
+    input.type = "number";
+    input.value = def.value != null ? String(def.value) : "";
+    if (def.min != null) input.min = String(def.min);
+    if (def.max != null) input.max = String(def.max);
+    if (def.step != null) input.step = String(def.step);
+    input.placeholder = def.placeholder || "";
+    input.autocomplete = "off";
+  } else {
+    input = document.createElement("input");
+    input.type = "text";
+    input.value = def.value != null ? String(def.value) : "";
+    input.placeholder = def.placeholder || "";
+    input.autocomplete = "off";
+    input.autocapitalize = "none";
+    input.spellcheck = false;
+  }
+
+  input.setAttribute("data-setting", def.id);
+  wrap.appendChild(input);
+
+  // Put below LIVE ID field, but before any huge custom blocks
+  // We append at end; index.template.html places LIVE ID first and allows injected fields after.
+  setupFields.appendChild(wrap);
+}
+
+function ensureCoreSettingsUI() {
+  // Commands (always configurable)
+  ensureSettingField({
+    id: "joinCommand",
+    type: "text",
+    span: false,
+    label: "Chat Command: Join",
+    value: (state.spec?.defaults?.joinCommand) || "join",
+    placeholder: "join"
+  });
+
+  ensureSettingField({
+    id: "actionCommand",
+    type: "text",
+    span: false,
+    label: "Chat Command: Action",
+    value: (state.spec?.defaults?.actionCommand) || "attack",
+    placeholder: "attack"
+  });
+
+  // Share fallback selector (only used if the game uses chat commands)
+  ensureSettingField({
+    id: "shareAsAction",
+    type: "checkbox",
+    span: false,
+    label: "Allow SHARE to trigger the Action command (for viewers who can’t chat)",
+    value: true
+  });
+
+  ensureSettingField({
+    id: "shareCountsAs",
+    type: "select",
+    span: false,
+    label: "If SHARE triggers something, what should it count as?",
+    value: "action",
+    options: [
+      { value: "none", label: "Do nothing" },
+      { value: "action", label: "Same as Action command" },
+      { value: "join", label: "Same as Join command" },
+      { value: "hype", label: "Fill Hype meter" }
+    ]
+  });
+
+  // Optional: host scaling (keeps template flexible for many game types)
+  ensureSettingField({
+    id: "difficulty",
+    type: "select",
+    span: false,
+    label: "Difficulty",
+    value: "normal",
+    options: [
+      { value: "easy", label: "Easy" },
+      { value: "normal", label: "Normal" },
+      { value: "hard", label: "Hard" }
+    ]
+  });
+
+  ensureSettingField({
+    id: "roundSeconds",
+    type: "number",
+    span: false,
+    label: "Round Seconds",
+    value: Number(state.spec?.defaultSettings?.roundSeconds || 120),
+    min: 30, max: 9999, step: 5
+  });
+
+  ensureSettingField({
+    id: "winGoal",
+    type: "number",
+    span: false,
+    label: "Win Goal",
+    value: Number(state.spec?.defaultSettings?.winGoal || 25),
+    min: 1, max: 9999, step: 1
   });
 }
 
-async function ensureProtoReady(){
-  if (hasProto()) return true;
+function readSettings() {
+  const out = {};
+  document.querySelectorAll("[data-setting]").forEach((el) => {
+    const id = el.getAttribute("data-setting");
+    if (!id) return;
+    if (el.type === "checkbox") out[id] = !!el.checked;
+    else out[id] = String(el.value || "").trim();
+  });
 
-  // Small, bounded fallback attempts (avoid endless loops)
-  const candidates = [
-    // Common single-bundle name used by some hosts:
-    "./proto.bundle.js",
-    "/proto.bundle.js",
+  // Normalize helpful defaults
+  out.joinCommand = normalizeCommand(out.joinCommand || "join");
+  out.actionCommand = normalizeCommand(out.actionCommand || "attack");
 
-    // Multi-bundle pattern (some projects ship these in the same folder):
-    "https://cdn.jsdelivr.net/npm/google-protobuf@3.21.2/google-protobuf.js",
-    "./generic.js", "/generic.js",
-    "./unknownobjects.js", "/unknownobjects.js",
-    "./data_linkmic_messages.js", "/data_linkmic_messages.js",
-  ];
+  out.roundSeconds = clampNum(out.roundSeconds, 30, 9999, 120);
+  out.winGoal = clampNum(out.winGoal, 1, 9999, 25);
 
-  for (let i = 0; i < candidates.length; i++){
-    if (hasProto()) return true;
-    const ok = await loadScriptOnce(candidates[i]);
-    if (ok && hasProto()) return true;
-  }
-
-  return hasProto();
+  state.settings = out;
+  return out;
 }
 
-/* =========================================================
-   Game: Orb Arena (template baseline)
-   - Always shows motion + entities on load
-   - Viewers can join/spawn orbs, push attacks, and power up via gifts
-   - Likes build an energy meter -> faster spawns + stronger shots
-========================================================= */
-const GAME = {
-  stageEl: null,
-  canvas: null,
-  ctx: null,
-  w: 0,
-  h: 0,
-  dpr: 1,
-
-  // timing
-  lastT: 0,
-  acc: 0,
-
-  // state
-  running: true,
-  connected: false,
-  pendingStart: false,
-
-  // systems
-  stars: [],
-  particles: [],
-  enemies: [],
-  projectiles: [],
-  players: new Map(), // userId -> player
-
-  // meters
-  energy: 0,        // 0..1
-  likeBurst: 0,     // small impulse
-  danger: 0,        // 0..1 (ramps with time)
-
-  // boss
-  boss: null,
-
-  // gameplay settings (safe defaults; AI can override via SPEC)
-  settings: {
-    roundSeconds: 30,
-    winGoal: 50,
-    enemySpawnBase: 0.85,     // seconds
-    enemySpawnMin: 0.22,
-    projectileSpeed: 620,
-    playerSpeed: 260,
-  },
-};
-
-function readSpecSettings(){
-  try{
-    const s = (SPEC && SPEC.defaultSettings) ? SPEC.defaultSettings : {};
-    if (typeof s.roundSeconds === "number") GAME.settings.roundSeconds = clamp(s.roundSeconds, 10, 300);
-    if (typeof s.winGoal === "number") GAME.settings.winGoal = clamp(s.winGoal, 1, 9999);
-  }catch{}
+function normalizeCommand(s) {
+  const t = String(s || "").trim().toLowerCase();
+  // allow "share" style text etc.
+  return t.replace(/^@/, "").replace(/\s+/g, " ").trim();
 }
 
-function makeStage(){
-  // Create the 9:16 game stage inside #gameRoot
+function clampNum(v, min, max, fallback) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+/* ============================================================
+   Engine: Canvas arena with boss + players + particles
+   ============================================================ */
+function mountCanvas() {
   if (!gameRoot) return;
 
-  const stage = document.createElement("div");
-  stage.className = "game-stage";
+  // Only mount once
+  if (state.canvas && state.ctx2d) return;
 
-  const canvas = document.createElement("canvas");
-  canvas.style.width = "100%";
-  canvas.style.height = "100%";
-  canvas.style.display = "block";
-  stage.appendChild(canvas);
+  const c = document.createElement("canvas");
+  c.style.width = "100%";
+  c.style.height = "100%";
+  c.style.display = "block";
+  c.style.touchAction = "none";
+  gameRoot.appendChild(c);
 
-  // HUD elements (using CSS helpers)
-  const hud = document.createElement("div");
-  hud.className = "hud";
+  state.canvas = c;
+  state.ctx2d = c.getContext("2d", { alpha: true });
 
-  const hudTop = document.createElement("div");
-  hudTop.className = "hud-top";
-
-  const chipLeft = document.createElement("div");
-  chipLeft.className = "hud-chip";
-  chipLeft.id = "hudLeft";
-  chipLeft.textContent = "Demo: running";
-
-  const chipRight = document.createElement("div");
-  chipRight.className = "hud-chip";
-  chipRight.id = "hudRight";
-  chipRight.textContent = "Energy: 0%";
-
-  hudTop.appendChild(chipLeft);
-  hudTop.appendChild(chipRight);
-  hud.appendChild(hudTop);
-
-  const meter = document.createElement("div");
-  meter.className = "meter";
-  const fill = document.createElement("div");
-  fill.className = "fill";
-  fill.id = "energyFill";
-  meter.appendChild(fill);
-  hud.appendChild(meter);
-
-  stage.appendChild(hud);
-  gameRoot.innerHTML = "";
-  gameRoot.appendChild(stage);
-
-  GAME.stageEl = stage;
-  GAME.canvas = canvas;
-  GAME.ctx = canvas.getContext("2d", { alpha: true });
-
-  function resize(){
-    const rect = stage.getBoundingClientRect();
-    GAME.dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-    GAME.w = Math.max(1, Math.floor(rect.width * GAME.dpr));
-    GAME.h = Math.max(1, Math.floor(rect.height * GAME.dpr));
-    canvas.width = GAME.w;
-    canvas.height = GAME.h;
-  }
-  window.addEventListener("resize", resize);
   resize();
+  window.addEventListener("resize", resize, { passive: true });
+
+  seedStars();
+  spawnBoss();
+  seedBots(7);
+
+  requestAnimationFrame(loop);
 }
 
-function initStars(){
-  GAME.stars.length = 0;
-  const count = 90;
-  for (let i = 0; i < count; i++){
-    GAME.stars.push({
+function resize() {
+  if (!state.canvas) return;
+  const rect = state.canvas.getBoundingClientRect();
+  state.dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  state.w = Math.max(10, Math.floor(rect.width));
+  state.h = Math.max(10, Math.floor(rect.height));
+  state.canvas.width = Math.floor(state.w * state.dpr);
+  state.canvas.height = Math.floor(state.h * state.dpr);
+}
+
+function seedStars() {
+  state.stars.length = 0;
+  const count = Math.floor(90 + (state.w * state.h) / 18000);
+  for (let i = 0; i < count; i++) {
+    state.stars.push({
       x: Math.random(),
       y: Math.random(),
-      z: Math.random(),
-      tw: Math.random(),
+      z: 0.3 + Math.random() * 0.7,
+      tw: Math.random()
     });
   }
 }
 
-function resetRun(){
-  GAME.particles.length = 0;
-  GAME.enemies.length = 0;
-  GAME.projectiles.length = 0;
-  GAME.players.clear();
-  GAME.boss = null;
-  GAME.energy = 0;
-  GAME.likeBurst = 0;
-  GAME.danger = 0;
+function spawnBoss() {
+  const hpBase = 140;
+  state.boss = {
+    x: 0.5,
+    y: 0.32,
+    r: 46,
+    hp: hpBase,
+    hpMax: hpBase,
+    phase: 0,
+    pulse: 0
+  };
 }
 
-function spawnParticle(x, y, vx, vy, life, size, a, b){
-  GAME.particles.push({
-    x, y, vx, vy,
-    life,
-    t: 0,
-    size,
-    a: a || "rgba(0,242,234,.9)",
-    b: b || "rgba(255,0,80,.9)",
-  });
-}
-
-function burst(x, y, power){
-  const p = clamp(power || 1, 0.4, 3.2);
-  const n = Math.floor(14 * p);
-  for (let i = 0; i < n; i++){
-    const ang = rand(0, Math.PI * 2);
-    const sp = rand(120, 520) * p;
-    const vx = Math.cos(ang) * sp;
-    const vy = Math.sin(ang) * sp;
-    spawnParticle(x, y, vx, vy, rand(0.35, 0.85), rand(1.5, 3.6) * p);
+function seedBots(n) {
+  state.bots.length = 0;
+  for (let i = 0; i < n; i++) {
+    state.bots.push(makePlayer({
+      userId: "BOT_" + i,
+      nickname: ["Spark","Nova","Rift","Pulse","Hex","Orbit","Vibe"][i % 7],
+      uniqueId: "bot" + i,
+      avatar: ""
+    }, true));
   }
 }
 
-function addEnemy(tier){
-  const w = GAME.w, h = GAME.h;
-  const side = Math.random() < 0.5 ? -1 : 1;
-  const x = (side < 0) ? -40 : (w + 40);
-  const y = rand(h * 0.15, h * 0.85);
-  const t = clamp(tier || 1, 1, 5);
-  const r = 10 + t * 6;
-  const hp = 1 + Math.floor(t * 1.2);
-  GAME.enemies.push({
+function makePlayer(user, isBot) {
+  const h = hash01(user.userId || user.uniqueId || user.nickname || "x");
+  const x = 0.15 + Math.random() * 0.70;
+  const y = 0.48 + Math.random() * 0.42;
+  const col = palette(h);
+  return {
+    id: String(user.userId || user.uniqueId || user.nickname || "anon"),
+    name: String(user.nickname || user.uniqueId || "viewer"),
+    pfp: String(user.avatar || ""),
+    isBot: !!isBot,
     x, y,
-    vx: side < 0 ? rand(70, 140) : -rand(70, 140),
-    vy: rand(-25, 25),
-    r,
-    hp,
-    tier: t,
+    vx: (Math.random() - 0.5) * 0.18,
+    vy: (Math.random() - 0.5) * 0.18,
+    r: isBot ? 12 : 13,
+    col,
+    score: 0,
+    lastShotAt: 0
+  };
+}
+
+function palette(t) {
+  // two theme-ish colors blended
+  const a = lerpColor([255,0,80], [0,242,234], t);
+  return `rgb(${a[0]|0},${a[1]|0},${a[2]|0})`;
+}
+
+function hash01(s) {
+  let h = 2166136261;
+  const str = String(s || "");
+  for (let i=0;i<str.length;i++){
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 10000) / 10000;
+}
+
+function lerp(a,b,t){ return a + (b-a)*t; }
+function lerpColor(a,b,t){
+  return [lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t)];
+}
+
+function spawnParticles(x, y, count, power, color) {
+  for (let i=0;i<count;i++){
+    state.particles.push({
+      x, y,
+      vx: (Math.random()-0.5) * power,
+      vy: (Math.random()-0.5) * power,
+      life: 0.55 + Math.random()*0.55,
+      age: 0,
+      col: color || "rgba(255,255,255,.9)"
+    });
+  }
+}
+
+function floater(text, x, y, color) {
+  state.floaters.push({
+    text: String(text || ""),
+    x, y,
+    vy: -0.08 - Math.random()*0.06,
+    life: 1.2,
+    age: 0,
+    col: color || "rgba(255,255,255,.90)"
   });
 }
 
-function ensurePlayer(user){
-  const u = user || {};
-  const id = safeStr(u.userId || u.uniqueId || u.nickname || u.id || ("guest_" + Math.floor(Math.random()*1e9)));
-  let p = GAME.players.get(id);
-  if (p) return p;
+function worldToPxX(x){ return x * state.w; }
+function worldToPxY(y){ return y * state.h; }
 
-  // spawn near bottom center with slight randomness
-  const w = GAME.w, h = GAME.h;
-  p = {
-    id,
-    name: safeStr(u.nickname || u.uniqueId || id),
-    pfp: u.profilePictureUrl || "",
-    x: w * 0.5 + rand(-w * 0.18, w * 0.18),
-    y: h * 0.72 + rand(-h * 0.10, h * 0.10),
-    vx: 0, vy: 0,
-    r: 14,
-    score: 0,
-    lastShot: 0,
-    shield: 0,
-    hue: rand(0, 360),
-  };
-  GAME.players.set(id, p);
+function screenShake(strength) {
+  state.shake = Math.min(1, state.shake + strength);
+}
+function screenFlash(strength) {
+  state.flash = Math.min(1, state.flash + strength);
+}
 
-  pushFlag("chat", u, "Joined the arena!", "tint-aqua");
-  burst(p.x, p.y, 1.1);
-
+/* ============================================================
+   Gameplay actions
+   ============================================================ */
+function ensurePlayer(user) {
+  const id = String(user.userId || user.uniqueId || user.nickname || "");
+  if (!id) return null;
+  let p = state.players.get(id);
+  if (!p) {
+    p = makePlayer(user, false);
+    state.players.set(id, p);
+    state.counters.joins++;
+    beep("join");
+    flag({ who: p.name, msg: `joined`, pfp: p.pfp, tint: "tint-good" });
+    floater("JOIN!", p.x, p.y, "rgba(46,229,157,.95)");
+    spawnParticles(p.x, p.y, 20, 0.42, "rgba(46,229,157,.85)");
+  }
   return p;
 }
 
-function shootFromPlayer(p, power){
-  const t = now();
-  if (t - p.lastShot < 180) return;
-  p.lastShot = t;
-
-  const sp = GAME.settings.projectileSpeed * (0.9 + power * 0.35);
-  const ang = rand(-0.25, 0.25) + (-Math.PI / 2);
-  GAME.projectiles.push({
-    x: p.x,
-    y: p.y - p.r - 6,
-    vx: Math.cos(ang) * sp,
-    vy: Math.sin(ang) * sp,
-    r: 5 + power * 2,
-    life: 1.2,
-    t: 0,
-    owner: p.id,
-    power: power,
-  });
+function joinAction(user) {
+  // Join (or keep alive)
+  const p = ensurePlayer(user);
+  if (!p) return;
+  // tiny bump for joining
+  p.vx += (Math.random()-0.5)*0.10;
+  p.vy += (Math.random()-0.5)*0.10;
 }
 
-function applyLikeImpulse(amount){
-  const a = clamp(amount || 1, 1, 1000);
-  const inc = clamp(a / 2500, 0.004, 0.06);
-  GAME.energy = clamp(GAME.energy + inc, 0, 1);
-  GAME.likeBurst = clamp(GAME.likeBurst + inc * 1.4, 0, 1);
+function actionAttack(user, strength) {
+  const p = ensurePlayer(user);
+  if (!p || !state.boss) return;
+
+  const now = performance.now();
+  if (now - p.lastShotAt < 180) return; // basic anti-spam per user
+  p.lastShotAt = now;
+
+  const dmg = Math.max(1, Math.floor(strength || 1));
+  state.boss.hp = Math.max(0, state.boss.hp - dmg);
+  p.score += dmg;
+
+  // FX
+  screenShake(0.20);
+  screenFlash(0.10);
+  beep("hit");
+
+  // particles around boss
+  spawnParticles(state.boss.x, state.boss.y, 18, 0.55, p.col);
+  floater("-" + dmg, state.boss.x, state.boss.y, p.col);
+
+  if (state.boss.hp <= 0) {
+    // Boss down => big celebration + respawn stronger
+    screenShake(0.85);
+    screenFlash(0.75);
+    beep("gift");
+
+    spawnParticles(state.boss.x, state.boss.y, 140, 1.2, "rgba(255,255,255,.95)");
+    floater("BOSS DOWN!", 0.5, 0.22, "rgba(255,255,255,.95)");
+    flag({ who: "SYSTEM", msg: `Boss defeated!`, pfp: "", tint: "tint-pink" });
+
+    // respawn with scaling
+    const nextMax = Math.min(9999, Math.floor((state.boss.hpMax || 140) * 1.22 + 20));
+    state.boss.hpMax = nextMax;
+    state.boss.hp = nextMax;
+    state.boss.phase = (state.boss.phase || 0) + 1;
+  }
 }
 
-function giftTierFromData(data){
-  // keep stable, no assumptions: use repeatCount / diamondCount if present
-  const d = data || {};
-  const diamonds = Number(d.diamondCount || d.diamond || 0);
-  const repeat = Number(d.repeatCount || d.repeat || 1);
-  const value = Math.max(1, diamonds * repeat);
-
-  if (value >= 1000) return 3; // big
-  if (value >= 100)  return 2; // medium
-  return 1;                   // small
+function addHype(amount) {
+  state.hype = Math.max(0, Math.min(1, state.hype + amount));
 }
 
-function applyGiftPower(data){
-  const tier = giftTierFromData(data);
-  const who = getUserFromMessage(data || {}) || { nickname: "Viewer", userId: "gift" };
+function likeBoost(count) {
+  const inc = Math.max(1, Number(count || 1));
+  state.counters.likes += inc;
+  addHype(Math.min(0.35, inc * 0.015));
+  state.hypePulse = 1;
+}
 
-  if (tier === 1){
-    // small: rapid shots from all players
-    pushFlag("gift", who, "Power-up: Rapid Fire!", "tint-aqua");
-    GAME.players.forEach(p => { for (let i=0;i<2;i++) shootFromPlayer(p, 0.7 + GAME.energy); });
-    burst(GAME.w*0.5, GAME.h*0.4, 1.2);
-  } else if (tier === 2){
-    // medium: shield + extra energy
-    pushFlag("gift", who, "Power-up: Team Shield!", "tint-pink");
-    GAME.players.forEach(p => { p.shield = Math.max(p.shield, 2.8); });
-    GAME.energy = clamp(GAME.energy + 0.22, 0, 1);
-    burst(GAME.w*0.5, GAME.h*0.45, 1.9);
-  } else {
-    // big: boss spawn (or boss nuke if already present)
-    if (!GAME.boss){
-      pushFlag("gift", who, "ULTIMATE: Boss Incoming!", "tint-pink");
-      GAME.boss = {
-        x: GAME.w * 0.5,
-        y: GAME.h * 0.18,
-        vx: rand(-90, 90),
-        vy: 0,
-        r: 44,
-        hp: 45,
-        t: 0
-      };
-      burst(GAME.boss.x, GAME.boss.y, 2.8);
-    }else{
-      pushFlag("gift", who, "ULTIMATE: Boss Nuke!", "tint-pink");
-      // nuke all enemies and damage boss
-      GAME.enemies.forEach(e => burst(e.x, e.y, 1.6));
-      GAME.enemies.length = 0;
-      GAME.boss.hp = Math.max(0, GAME.boss.hp - 18);
-      burst(GAME.boss.x, GAME.boss.y, 3.2);
+function giftPower(name, repeat) {
+  const r = Math.max(1, Number(repeat || 1));
+  state.counters.gifts += r;
+
+  // tiered gift impact
+  const tier = r >= 10 ? "L" : r >= 5 ? "M" : "S";
+  const msg = `sent ${name || "gift"} ×${r}`;
+  flag({ who: "GIFT", msg, pfp: "", tint: "tint-pink" });
+  beep("gift");
+  addHype(tier === "L" ? 0.55 : tier === "M" ? 0.32 : 0.18);
+
+  // big effect: burst damage to boss
+  if (state.boss) {
+    const dmg = tier === "L" ? 30 : tier === "M" ? 16 : 8;
+    state.boss.hp = Math.max(0, state.boss.hp - dmg);
+    screenShake(tier === "L" ? 0.75 : 0.45);
+    screenFlash(tier === "L" ? 0.65 : 0.40);
+    spawnParticles(state.boss.x, state.boss.y, tier === "L" ? 120 : tier === "M" ? 70 : 40, tier === "L" ? 1.3 : 0.9, "rgba(255,255,255,.95)");
+    floater("GIFT HIT!", state.boss.x, state.boss.y, "rgba(255,255,255,.92)");
+    if (state.boss.hp <= 0) {
+      // Let normal attack logic handle respawn next frame
     }
   }
 }
 
-/* =========================================================
-   Message parsing helpers (stable + safe)
-   - TikTokClient emits objects with varying shapes; we normalize.
-========================================================= */
-function getChatTextFromMessage(msg){
-  try{
-    const m = msg || {};
-    // common possibilities:
-    return safeStr(m.comment || m.text || m.message || m.msg || m.content || "");
-  }catch{
-    return "";
+/* ============================================================
+   Render loop
+   ============================================================ */
+function loop(now) {
+  const dt = Math.min(0.033, Math.max(0.001, (now - state.last) / 1000));
+  state.last = now;
+
+  step(dt);
+  draw(dt);
+
+  requestAnimationFrame(loop);
+}
+
+function step(dt) {
+  // decay meters
+  state.hype = Math.max(0, state.hype - state.hypeDecay * dt);
+  state.hypePulse = Math.max(0, state.hypePulse - 2.6 * dt);
+  state.shake = Math.max(0, state.shake - 2.5 * dt);
+  state.flash = Math.max(0, state.flash - 2.2 * dt);
+
+  // boss pulse
+  if (state.boss) {
+    state.boss.pulse = (state.boss.pulse || 0) + dt * (1.8 + state.hype * 2.8);
+  }
+
+  // bots move and occasionally shoot
+  for (const b of state.bots) {
+    wander(b, dt);
+    if (Math.random() < (0.30 + state.hype * 0.55) * dt) {
+      actionAttack({ userId: b.id, nickname: b.name, uniqueId: b.id, avatar: "" }, 1);
+    }
+  }
+
+  // players
+  for (const p of state.players.values()) {
+    wander(p, dt);
+  }
+
+  // particles
+  for (let i = state.particles.length - 1; i >= 0; i--) {
+    const pt = state.particles[i];
+    pt.age += dt;
+    pt.x += pt.vx * dt;
+    pt.y += pt.vy * dt;
+    pt.vx *= Math.pow(0.22, dt);
+    pt.vy *= Math.pow(0.22, dt);
+    if (pt.age >= pt.life) state.particles.splice(i, 1);
+  }
+
+  // floaters
+  for (let i = state.floaters.length - 1; i >= 0; i--) {
+    const f = state.floaters[i];
+    f.age += dt;
+    f.y += f.vy * dt;
+    if (f.age >= f.life) state.floaters.splice(i, 1);
+  }
+
+  // Hype triggers occasional meteor shower effect
+  if (state.hype > 0.82 && Math.random() < 0.65 * dt) {
+    spawnParticles(Math.random(), 0.04, 12, 0.75, "rgba(0,242,234,.95)");
+    screenShake(0.08);
   }
 }
 
-function getUserFromMessage(msg){
-  try{
-    const m = msg || {};
-    const u = m.user || m.userInfo || m.sender || m.author || m.profile || {};
-    // normalize fields used in UI + gameplay
-    const userId = safeStr(u.userId || u.id || u.uniqueId || m.userId || m.uniqueId || "");
-    const uniqueId = safeStr(u.uniqueId || u.username || m.uniqueId || "");
-    const nickname = safeStr(u.nickname || u.displayName || m.nickname || uniqueId || userId || "Viewer");
-    const profilePictureUrl =
-      safeStr(u.profilePictureUrl || u.avatarThumb || u.avatar || u.pfp || m.profilePictureUrl || "");
-    return { userId: userId || uniqueId || nickname, uniqueId, nickname, profilePictureUrl };
-  }catch{
-    return { userId: "viewer", uniqueId: "", nickname: "Viewer", profilePictureUrl: "" };
+function wander(p, dt) {
+  // wobble
+  const sp = 0.24 + state.hype * 0.38;
+  p.vx += (Math.random() - 0.5) * sp * dt;
+  p.vy += (Math.random() - 0.5) * sp * dt;
+
+  // clamp velocity
+  p.vx = Math.max(-0.28, Math.min(0.28, p.vx));
+  p.vy = Math.max(-0.28, Math.min(0.28, p.vy));
+
+  p.x += p.vx * dt;
+  p.y += p.vy * dt;
+
+  // bounds
+  const pad = 0.06;
+  if (p.x < pad) { p.x = pad; p.vx *= -0.85; }
+  if (p.x > 1 - pad) { p.x = 1 - pad; p.vx *= -0.85; }
+  if (p.y < 0.18) { p.y = 0.18; p.vy *= -0.85; }
+  if (p.y > 0.96) { p.y = 0.96; p.vy *= -0.85; }
+}
+
+function draw(dt) {
+  const g = state.ctx2d;
+  const c = state.canvas;
+  if (!g || !c) return;
+
+  g.save();
+  g.scale(state.dpr, state.dpr);
+
+  // shake
+  const sh = state.shake;
+  if (sh > 0.001) {
+    g.translate((Math.random() - 0.5) * 10 * sh, (Math.random() - 0.5) * 10 * sh);
+  }
+
+  // background
+  g.clearRect(0, 0, state.w, state.h);
+  drawStars(g);
+  drawGlow(g);
+
+  // boss
+  drawBoss(g);
+
+  // players + bots
+  for (const b of state.bots) drawPlayer(g, b, true);
+  for (const p of state.players.values()) drawPlayer(g, p, false);
+
+  // particles
+  for (const pt of state.particles) {
+    const t = pt.age / pt.life;
+    g.globalAlpha = (1 - t) * 0.9;
+    g.fillStyle = pt.col;
+    g.beginPath();
+    g.arc(worldToPxX(pt.x), worldToPxY(pt.y), 2.2 + (1 - t) * 2.0, 0, Math.PI * 2);
+    g.fill();
+  }
+  g.globalAlpha = 1;
+
+  // HUD
+  drawHUD(g);
+
+  // floaters
+  for (const f of state.floaters) {
+    const t = f.age / f.life;
+    g.globalAlpha = (1 - t) * 0.95;
+    g.fillStyle = f.col;
+    g.font = "900 18px system-ui,Segoe UI,Roboto,Arial";
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.fillText(f.text, worldToPxX(f.x), worldToPxY(f.y));
+  }
+  g.globalAlpha = 1;
+
+  // flash
+  if (state.flash > 0.001) {
+    g.globalAlpha = 0.18 * state.flash;
+    g.fillStyle = "#ffffff";
+    g.fillRect(0, 0, state.w, state.h);
+    g.globalAlpha = 1;
+  }
+
+  g.restore();
+}
+
+function drawStars(g) {
+  g.save();
+  g.globalAlpha = 0.85;
+  for (const s of state.stars) {
+    s.tw += 0.8 * (0.02 + Math.random() * 0.02);
+    const tw = 0.4 + 0.6 * Math.abs(Math.sin(s.tw));
+    const x = s.x * state.w;
+    const y = s.y * state.h;
+    g.globalAlpha = 0.10 + 0.35 * tw * s.z;
+    g.fillStyle = "rgba(255,255,255,.9)";
+    g.fillRect(x, y, 1.0 + s.z, 1.0 + s.z);
+  }
+  g.restore();
+}
+
+function drawGlow(g) {
+  // center haze
+  const grd = g.createRadialGradient(state.w * 0.5, state.h * 0.35, 10, state.w * 0.5, state.h * 0.35, state.w * 0.65);
+  grd.addColorStop(0, "rgba(255,0,80,.10)");
+  grd.addColorStop(0.55, "rgba(0,242,234,.06)");
+  grd.addColorStop(1, "rgba(0,0,0,0)");
+  g.fillStyle = grd;
+  g.fillRect(0, 0, state.w, state.h);
+}
+
+function drawBoss(g) {
+  const b = state.boss;
+  if (!b) return;
+
+  const x = worldToPxX(b.x);
+  const y = worldToPxY(b.y);
+
+  const pulse = 1 + 0.06 * Math.sin(b.pulse || 0);
+  const r = (b.r || 46) * pulse;
+
+  // outer ring
+  g.save();
+  g.globalAlpha = 0.35 + state.hype * 0.25;
+  g.strokeStyle = "rgba(255,255,255,.45)";
+  g.lineWidth = 2;
+  g.beginPath();
+  g.arc(x, y, r + 10 + 12 * state.hypePulse, 0, Math.PI * 2);
+  g.stroke();
+  g.restore();
+
+  // body
+  const grd = g.createRadialGradient(x - r*0.3, y - r*0.35, 8, x, y, r);
+  grd.addColorStop(0, "rgba(255,255,255,.95)");
+  grd.addColorStop(0.22, "rgba(255,0,80,.55)");
+  grd.addColorStop(0.62, "rgba(0,242,234,.35)");
+  grd.addColorStop(1, "rgba(0,0,0,.15)");
+  g.fillStyle = grd;
+  g.beginPath();
+  g.arc(x, y, r, 0, Math.PI * 2);
+  g.fill();
+
+  // eyes
+  g.fillStyle = "rgba(0,0,0,.55)";
+  g.beginPath();
+  g.arc(x - r*0.22, y - r*0.10, Math.max(2, r*0.08), 0, Math.PI * 2);
+  g.arc(x + r*0.22, y - r*0.10, Math.max(2, r*0.08), 0, Math.PI * 2);
+  g.fill();
+
+  // HP bar
+  const bw = Math.min(state.w * 0.78, 520);
+  const bh = 10;
+  const bx = state.w * 0.5 - bw * 0.5;
+  const by = state.h * 0.08;
+
+  const pct = b.hpMax ? (b.hp / b.hpMax) : 1;
+
+  g.save();
+  g.globalAlpha = 0.9;
+  roundRect(g, bx, by, bw, bh, 999);
+  g.fillStyle = "rgba(0,0,0,.32)";
+  g.fill();
+  roundRect(g, bx, by, bw * pct, bh, 999);
+  g.fillStyle = pct > 0.35 ? "rgba(46,229,157,.92)" : "rgba(255,77,77,.92)";
+  g.fill();
+  g.restore();
+}
+
+function drawPlayer(g, p, isBot) {
+  const x = worldToPxX(p.x);
+  const y = worldToPxY(p.y);
+  const r = (p.r || 12);
+
+  // glow
+  g.save();
+  g.globalAlpha = 0.18;
+  g.fillStyle = p.col;
+  g.beginPath();
+  g.arc(x, y, r * 2.6, 0, Math.PI * 2);
+  g.fill();
+  g.restore();
+
+  // body
+  g.fillStyle = p.col;
+  g.beginPath();
+  g.arc(x, y, r * 1.18, 0, Math.PI * 2);
+  g.fill();
+
+  // outline
+  g.strokeStyle = "rgba(255,255,255,.35)";
+  g.lineWidth = 1;
+  g.beginPath();
+  g.arc(x, y, r * 1.18, 0, Math.PI * 2);
+  g.stroke();
+
+  // name plate (only for real players, keep HUD clean)
+  if (!isBot) {
+    g.save();
+    g.globalAlpha = 0.9;
+    g.font = "900 12px system-ui,Segoe UI,Roboto,Arial";
+    g.textAlign = "center";
+    g.textBaseline = "top";
+    g.fillStyle = "rgba(255,255,255,.90)";
+    g.fillText(p.name, x, y + r * 1.6);
+    g.restore();
   }
 }
 
-function normalizeText(t){
-  return safeStr(t).trim().toLowerCase();
+function drawHUD(g) {
+  // Hype meter (likes/shares)
+  const w = Math.min(state.w * 0.72, 420);
+  const h = 14;
+  const x = state.w * 0.5 - w * 0.5;
+  const y = state.h - 28;
+
+  const pct = Math.max(0, Math.min(1, state.hype));
+
+  g.save();
+  g.globalAlpha = 0.92;
+  roundRect(g, x, y, w, h, 999);
+  g.fillStyle = "rgba(0,0,0,.32)";
+  g.fill();
+
+  roundRect(g, x, y, w * pct, h, 999);
+  g.fillStyle = "rgba(0,242,234,.92)";
+  g.fill();
+
+  // label
+  g.font = "900 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace";
+  g.fillStyle = "rgba(247,247,251,.88)";
+  g.textAlign = "center";
+  g.textBaseline = "bottom";
+  g.fillText("HYPE", state.w * 0.5, y - 4);
+
+  // counters corner
+  g.textAlign = "left";
+  g.textBaseline = "top";
+  g.font = "900 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace";
+  g.fillStyle = "rgba(247,247,251,.78)";
+  g.fillText(
+    `chat ${state.counters.chats}  likes ${state.counters.likes}  gifts ${state.counters.gifts}`,
+    14,
+    12
+  );
+
+  g.restore();
 }
 
-function normalizeTeamText(text){
-  // kept for compatibility with your working pattern (can be used by AI_REGION)
-  const t = normalizeText(text);
-  if (!t) return null;
-  if (t.includes("red")) return "red";
-  if (t.includes("blue")) return "blue";
-  if (t.includes("green")) return "green";
-  if (t.includes("yellow")) return "yellow";
-  return null;
+function roundRect(g, x, y, w, h, r) {
+  const rr = Math.min(r, h / 2, w / 2);
+  g.beginPath();
+  g.moveTo(x + rr, y);
+  g.arcTo(x + w, y, x + w, y + h, rr);
+  g.arcTo(x + w, y + h, x, y + h, rr);
+  g.arcTo(x, y + h, x, y, rr);
+  g.arcTo(x, y, x + w, y, rr);
+  g.closePath();
 }
 
-function normalizeAnswerText(text){
-  // kept for compatibility with your working pattern (can be used by AI_REGION)
-  const t = normalizeText(text);
-  if (!t) return null;
-  if (t === "a" || t.includes(" a ")) return "A";
-  if (t === "b" || t.includes(" b ")) return "B";
-  if (t === "c" || t.includes(" c ")) return "C";
-  if (t === "d" || t.includes(" d ")) return "D";
-  return null;
-}
-
-/* =========================================================
+/* ============================================================
    ✅ WORKING TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
-   (verbatim structure + error handling style; used as reference)
-========================================================= */
+   (Structure preserved; adapted to generic gameplay)
+   ============================================================ */
 
 // 7. TikTok message handling
 // ===============================
 
 function handleTeamJoin(text, user) {
-    const maybeTeam = normalizeTeamText(text);
-    if (!maybeTeam) return;
+  // For general games, use this as "join" command detection
+  const maybeJoin = normalizeJoinText(text);
+  if (!maybeJoin) return;
 
-    // Assign or move team.
-    userTeams.set(user.userId, maybeTeam);
-    console.log(`${user.nickname} joined team ${maybeTeam}`);
+  // Join the game
+  joinAction(user);
+  console.log(`${user.nickname} joined game`);
 }
 
 function handleAnswer(text, user) {
-    if (!gameStarted || gameFinished) return;
-    if (!userTeams.has(user.userId)) return; // must be on a team first
+  // For general games, use this as "action" command detection
+  const maybeAction = normalizeActionText(text);
+  if (!maybeAction) return;
 
-    const answer = normalizeAnswerText(text);
-    if (!answer) return;
-
-    // Only allow one answer per question per user
-    if (answeredUsersThisQuestion.has(user.userId)) return;
-    answeredUsersThisQuestion.set(user.userId, true);
-
-    const team = userTeams.get(user.userId);
-    const q = getCurrentQuestion();
-    if (!q) return;
-
-    // Track participation per round
-    if (roundAnswerCounts[team] !== undefined) {
-        roundAnswerCounts[team] += 1;
-    }
-
-    if (answer === q.correct) {
-        teamScores[team]++;
-        teamRoundScores[team]++;
-        updateScoreDisplay();
-        flashCorrectAnswer(user.nickname, team, answer);
-    }
-
-    updateRoundDuelBar();
+  // Perform action (attack boss)
+  actionAttack(user, 2);
 }
 
+// Chat event
 function onChatMessage(data) {
-    try {
-        const msg = data || {};
-        const text = getChatTextFromMessage(msg);
-        const user = getUserFromMessage(msg);
+  try {
+    const msg = data || {};
+    const text = getChatTextFromMessage(msg);
+    const user = getUserFromMessage(msg);
+    if (!text) return;
 
-        if (!text) return;
+    state.counters.chats++;
+    flag({ who: user.nickname || user.uniqueId || "viewer", msg: text, pfp: user.avatar, tint: "tint-aqua" });
 
-        // 1) Team selection ("red" / "blue"; any case)
-        handleTeamJoin(text, user);
+    // 1) Join selection (join command; any case)
+    handleTeamJoin(text, user);
 
-        // 2) Answer selection ("A"/"B"/"C"/"D"; any case)
-        handleAnswer(text, user);
-    } catch (e) {
-        console.error("Error in chat handler:", e);
-    }
+    // 2) Action selection (action command; any case)
+    handleAnswer(text, user);
+
+    // 3) Game-specific extra chat routing (AI region)
+    try { if (typeof aiOnChat === "function") aiOnChat(state, { text, user }); } catch(e){}
+  } catch (e) {
+    console.error("Error in chat handler:", e);
+  }
 }
 
 function onGiftMessage(data) {
-    try {
-        // You can optionally use gifts to boost scores, etc.
-        console.log("Gift message:", data);
-    } catch (e) {
-        console.error("Error in gift handler:", e);
-    }
+  try {
+    const g = normalizeGift(data);
+    giftPower(g.giftName, g.repeat);
+    try { if (typeof aiOnGift === "function") aiOnGift(state, g); } catch(e){}
+  } catch (e) {
+    console.error("Error in gift handler:", e);
+  }
 }
 
 // ===============================
@@ -607,689 +1007,319 @@ function onGiftMessage(data) {
 // ===============================
 
 function setupTikTokClient(liveId) {
-    if (!liveId) {
-        throw new Error("liveId is required");
-    }
-
-    if (client && client.socket) {
-        try {
-            client.socket.close();
-        } catch (e) {
-            console.warn("Error closing previous socket:", e);
-        }
-    }
-
-    if (typeof TikTokClient === "undefined") {
-        throw new Error("TikTokClient is not available. Check tiktok-client.js.");
-    }
-
-    client = new TikTokClient(liveId);
-
-    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
-    if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
-        client.setAccessToken(CHATTOK_CREATOR_TOKEN);
-    }
-
-    client.on("connected", () => {
-        console.log("Connected to TikTok hub.");
-        if (statusText) statusText.textContent = "Connected to TikTok LIVE.";
-        if (statusTextInGame) statusTextInGame.textContent = "Connected.";
-
-        // Only start game once we know we're connected
-        if (pendingStart && !gameStarted) {
-            beginGame();
-        }
-    });
-
-    client.on("disconnected", (reason) => {
-        console.log("Disconnected from TikTok hub:", reason);
-        const msg = reason || "Connection closed";
-        if (statusText) statusText.textContent = "Disconnected: " + msg;
-        if (statusTextInGame) statusTextInGame.textContent = "Disconnected: " + msg;
-
-        if (!gameStarted) {
-            // Connection failed before game start; allow retry
-            pendingStart = false;
-        }
-    });
-
-    client.on("error", (err) => {
-        console.error("TikTok client error:", err);
-        if (statusText) statusText.textContent =
-            "Error: " + (err && err.message ? err.message : "Unknown");
-    });
-
-    client.on("chat", onChatMessage);
-    client.on("gift", onGiftMessage);
-    client.on("like", (data) => {
-        // Optionally use likes later
-        // console.log("Like message:", data);
-    });
-
-    client.connect();
-}
-
-/* =========================================================
-   Actual game message handling (Orb Arena)
-   - Uses same safe patterns (try/catch + normalize)
-========================================================= */
-let client = null;
-
-// demo state + stable gates (separate from the example snippet variables)
-let gameStarted = false;
-let gameFinished = false;
-let pendingStart = false;
-
-// These exist only to keep the example snippet intact (not used by Orb Arena).
-// They must NOT break runtime.
-const userTeams = new Map();
-const answeredUsersThisQuestion = new Map();
-const teamScores = { red:0, blue:0, green:0, yellow:0 };
-const teamRoundScores = { red:0, blue:0, green:0, yellow:0 };
-const roundAnswerCounts = { red:0, blue:0, green:0, yellow:0 };
-function updateScoreDisplay(){}
-function flashCorrectAnswer(){}
-function updateRoundDuelBar(){}
-function getCurrentQuestion(){ return null; }
-function beginGame(){ /* Orb Arena uses beginOrbArena() */ }
-
-function orbOnChatMessage(data){
-  try{
-    const msg = data || {};
-    const text = getChatTextFromMessage(msg);
-    const user = getUserFromMessage(msg);
-    if (!text) return;
-
-    const t = normalizeText(text);
-
-    // “join” is always supported
-    if (t === "join" || t === "!join" || t.includes(" join")){
-      ensurePlayer(user);
-      return;
-    }
-
-    // quick “shoot”
-    if (t === "shoot" || t === "!shoot" || t.includes(" shoot")){
-      const p = ensurePlayer(user);
-      shootFromPlayer(p, 0.8 + GAME.energy);
-      pushFlag("chat", user, "Shoot!", "tint-aqua");
-      return;
-    }
-
-    // “shield”
-    if (t === "shield" || t === "!shield" || t.includes(" shield")){
-      const p = ensurePlayer(user);
-      p.shield = Math.max(p.shield, 2.2);
-      pushFlag("chat", user, "Shield up!", "tint-pink");
-      burst(p.x, p.y, 1.6);
-      return;
-    }
-
-    // “bomb” (requires some energy)
-    if (t === "bomb" || t === "!bomb" || t.includes(" bomb")){
-      const need = 0.35;
-      if (GAME.energy < need){
-        pushFlag("chat", user, "Need more likes (energy) for BOMB!", "tint-dark");
-        return;
-      }
-      GAME.energy = clamp(GAME.energy - need, 0, 1);
-      pushFlag("chat", user, "BOMB!", "tint-pink");
-
-      // clear enemies + damage boss
-      for (let i=0;i<GAME.enemies.length;i++){
-        burst(GAME.enemies[i].x, GAME.enemies[i].y, 1.4);
-      }
-      GAME.enemies.length = 0;
-      if (GAME.boss) GAME.boss.hp = Math.max(0, GAME.boss.hp - 10);
-      burst(GAME.w*0.5, GAME.h*0.45, 2.3);
-      return;
-    }
-
-    // AI_REGION can add more commands/actions.
-    // fallthrough: small reaction flag (non-blocking)
-    pushFlag("chat", user, text, "tint-dark");
-  }catch(e){
-    console.error("Error in chat handler:", e);
-  }
-}
-
-function orbOnGiftMessage(data){
-  try{
-    applyGiftPower(data);
-  }catch(e){
-    console.error("Error in gift handler:", e);
-  }
-}
-
-function orbOnLikeMessage(data){
-  try{
-    // likes can be a count; we normalize
-    const c = Number((data && (data.likeCount || data.count || data.likes)) || 1);
-    applyLikeImpulse(isFinite(c) ? c : 1);
-
-    const u = getUserFromMessage(data || {});
-    // only show occasional like flags (avoid spam)
-    if (Math.random() < 0.08){
-      pushFlag("like", u, "Likes boosted energy!", "tint-aqua");
-    }
-  }catch(e){
-    console.error("Error in like handler:", e);
-  }
-}
-
-/* =========================================================
-   Orb Arena: loop + collisions
-========================================================= */
-let enemySpawnTimer = 0;
-
-function step(dt){
-  const w = GAME.w, h = GAME.h;
-  if (!w || !h || !GAME.ctx) return;
-
-  // meters
-  GAME.likeBurst *= Math.pow(0.001, dt); // quick decay
-  GAME.danger = clamp(GAME.danger + dt * 0.012, 0, 1);
-  // energy slowly decays
-  GAME.energy = clamp(GAME.energy - dt * 0.02, 0, 1);
-
-  // spawn enemies (faster with danger + energy)
-  const spd = clamp(1 - (GAME.danger * 0.55 + GAME.energy * 0.55), 0.25, 1);
-  const interval = clamp(GAME.settings.enemySpawnBase * spd, GAME.settings.enemySpawnMin, 1.2);
-
-  enemySpawnTimer -= dt;
-  if (enemySpawnTimer <= 0){
-    enemySpawnTimer = interval;
-
-    // tier ramps
-    const tier = 1 + Math.floor(GAME.danger * 3.2 + GAME.energy * 1.8);
-    addEnemy(clamp(tier, 1, 5));
+  if (!liveId) {
+    throw new Error("liveId is required");
   }
 
-  // boss behavior
-  if (GAME.boss){
-    const b = GAME.boss;
-    b.t += dt;
-    b.x += b.vx * dt;
-    // bounce
-    if (b.x < b.r){ b.x = b.r; b.vx *= -1; }
-    if (b.x > w - b.r){ b.x = w - b.r; b.vx *= -1; }
-    // occasional pulse spawn
-    if (Math.floor(b.t * 2) !== Math.floor((b.t - dt) * 2)){
-      addEnemy(4);
-      addEnemy(3);
-    }
-    if (b.hp <= 0){
-      burst(b.x, b.y, 3.3);
-      GAME.boss = null;
+  if (client && client.socket) {
+    try {
+      client.socket.close();
+    } catch (e) {
+      console.warn("Error closing previous socket:", e);
     }
   }
 
-  // players idle drift + shield decay
-  GAME.players.forEach((p) => {
-    p.shield = Math.max(0, p.shield - dt);
-    // slight drift for life
-    p.vx += Math.sin((now()*0.001) + p.hue) * 6 * dt;
-    p.vy += Math.cos((now()*0.0012) + p.hue) * 6 * dt;
-    p.vx *= Math.pow(0.001, dt);
-    p.vy *= Math.pow(0.001, dt);
-
-    p.x = clamp(p.x + p.vx, p.r, w - p.r);
-    p.y = clamp(p.y + p.vy, p.r, h - p.r);
-  });
-
-  // projectiles
-  for (let i = GAME.projectiles.length - 1; i >= 0; i--){
-    const pr = GAME.projectiles[i];
-    pr.t += dt;
-    pr.x += pr.vx * dt;
-    pr.y += pr.vy * dt;
-    if (pr.t > pr.life || pr.y < -60 || pr.x < -80 || pr.x > w + 80){
-      GAME.projectiles.splice(i, 1);
-      continue;
-    }
-
-    // hit enemies
-    for (let j = GAME.enemies.length - 1; j >= 0; j--){
-      const e = GAME.enemies[j];
-      const dx = pr.x - e.x;
-      const dy = pr.y - e.y;
-      const rr = pr.r + e.r;
-      if (dx*dx + dy*dy <= rr*rr){
-        e.hp -= 1 + Math.floor(pr.power * 0.9);
-        burst(pr.x, pr.y, 1.0 + pr.power * 0.6);
-        GAME.projectiles.splice(i, 1);
-
-        if (e.hp <= 0){
-          burst(e.x, e.y, 1.5 + e.tier * 0.3);
-          GAME.enemies.splice(j, 1);
-          // reward
-          GAME.energy = clamp(GAME.energy + 0.05 + e.tier * 0.01, 0, 1);
-        }
-        break;
-      }
-    }
-
-    // hit boss
-    if (GAME.boss){
-      const b = GAME.boss;
-      const dx = pr.x - b.x;
-      const dy = pr.y - b.y;
-      const rr = pr.r + b.r;
-      if (dx*dx + dy*dy <= rr*rr){
-        b.hp -= 1 + Math.floor(pr.power * 1.2);
-        burst(pr.x, pr.y, 1.3 + pr.power);
-        GAME.projectiles.splice(i, 1);
-      }
-    }
+  if (typeof TikTokClient === "undefined") {
+    throw new Error("TikTokClient is not available. Check tiktok-client.js.");
   }
 
-  // enemies movement + collisions with players
-  for (let i = GAME.enemies.length - 1; i >= 0; i--){
-    const e = GAME.enemies[i];
-    e.x += e.vx * dt;
-    e.y += e.vy * dt;
+  client = new TikTokClient(liveId);
 
-    // gentle wander
-    e.vy += Math.sin((now()*0.001) + e.x * 0.001) * 18 * dt;
-    e.vy *= Math.pow(0.001, dt);
-
-    // remove off-screen
-    if (e.x < -120 || e.x > w + 120){
-      GAME.enemies.splice(i, 1);
-      continue;
-    }
-
-    // collide with players (damage shield / burst)
-    GAME.players.forEach((p) => {
-      const dx = e.x - p.x;
-      const dy = e.y - p.y;
-      const rr = e.r + p.r + (p.shield > 0 ? 10 : 0);
-      if (dx*dx + dy*dy <= rr*rr){
-        // hit FX
-        burst((e.x + p.x)/2, (e.y + p.y)/2, 1.3);
-        // knock
-        const inv = 1 / Math.max(1, Math.sqrt(dx*dx + dy*dy));
-        p.vx -= dx * inv * 80;
-        p.vy -= dy * inv * 80;
-
-        // shield absorbs
-        if (p.shield > 0){
-          p.shield = Math.max(0, p.shield - 0.6);
-          e.hp -= 1;
-        }else{
-          e.hp -= 1;
-        }
-
-        if (e.hp <= 0){
-          burst(e.x, e.y, 1.4);
-          // remove this enemy
-          const idx = GAME.enemies.indexOf(e);
-          if (idx >= 0) GAME.enemies.splice(idx, 1);
-        }
-      }
-    });
+  // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
+  if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
+    client.setAccessToken(CHATTOK_CREATOR_TOKEN);
   }
 
-  // particles
-  for (let i = GAME.particles.length - 1; i >= 0; i--){
-    const p = GAME.particles[i];
-    p.t += dt;
-    p.x += p.vx * dt;
-    p.y += p.vy * dt;
-    p.vx *= Math.pow(0.001, dt);
-    p.vy *= Math.pow(0.001, dt);
-    if (p.t >= p.life) GAME.particles.splice(i, 1);
-  }
+  client.on("connected", () => {
+    console.log("Connected to TikTok hub.");
+    state.connected = true;
+    setStatus("Connected", true);
 
-  // autopilot demo shooting
-  const shootChance = 0.04 + GAME.energy * 0.12 + GAME.likeBurst * 0.25;
-  if (Math.random() < shootChance){
-    // ensure at least 1 demo player exists so action is visible
-    const demo = ensurePlayer({ userId: "demo", nickname: "Demo", profilePictureUrl: "" });
-    shootFromPlayer(demo, 0.65 + GAME.energy);
-  }
+    flag({ who: "SYSTEM", msg: "Connected to TikTok LIVE", pfp: "", tint: "tint-good" });
 
-  // update HUD
-  const hudLeft = document.getElementById("hudLeft");
-  const hudRight = document.getElementById("hudRight");
-  const fill = document.getElementById("energyFill");
-
-  if (hudLeft){
-    hudLeft.textContent = (GAME.connected ? "LIVE: connected" : "Demo: running") + " • Players: " + GAME.players.size;
-  }
-  if (hudRight){
-    hudRight.textContent = "Energy: " + Math.round(GAME.energy * 100) + "%";
-  }
-  if (fill){
-    fill.style.width = Math.round(GAME.energy * 100) + "%";
-  }
-}
-
-function draw(){
-  const ctx = GAME.ctx;
-  const w = GAME.w, h = GAME.h;
-  if (!ctx || !w || !h) return;
-
-  ctx.clearRect(0, 0, w, h);
-
-  // starfield
-  ctx.save();
-  ctx.globalAlpha = 0.9;
-  for (let i=0;i<GAME.stars.length;i++){
-    const s = GAME.stars[i];
-    const px = s.x * w;
-    const py = s.y * h;
-    const tw = 0.4 + 0.6 * Math.abs(Math.sin((now()*0.0012) + s.tw*10));
-    const r = 0.6 + s.z * 1.6;
-    ctx.fillStyle = `rgba(255,255,255,${0.12 + tw*0.18})`;
-    ctx.beginPath();
-    ctx.arc(px, py, r, 0, Math.PI*2);
-    ctx.fill();
-  }
-  ctx.restore();
-
-  // soft vignette
-  ctx.save();
-  const g = ctx.createRadialGradient(w*0.5, h*0.5, Math.min(w,h)*0.1, w*0.5, h*0.5, Math.min(w,h)*0.75);
-  g.addColorStop(0, "rgba(0,0,0,0)");
-  g.addColorStop(1, "rgba(0,0,0,0.32)");
-  ctx.fillStyle = g;
-  ctx.fillRect(0,0,w,h);
-  ctx.restore();
-
-  // enemies
-  for (let i=0;i<GAME.enemies.length;i++){
-    const e = GAME.enemies[i];
-    ctx.save();
-    ctx.translate(e.x, e.y);
-
-    // glow
-    ctx.shadowBlur = 18;
-    ctx.shadowColor = "rgba(255,0,80,.35)";
-    ctx.fillStyle = "rgba(255,0,80,.18)";
-    ctx.beginPath();
-    ctx.arc(0,0,e.r+6,0,Math.PI*2);
-    ctx.fill();
-
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "rgba(255,255,255,.85)";
-    ctx.beginPath();
-    ctx.arc(0,0,e.r,0,Math.PI*2);
-    ctx.fill();
-
-    ctx.strokeStyle = "rgba(0,242,234,.45)";
-    ctx.lineWidth = 2 * GAME.dpr;
-    ctx.beginPath();
-    ctx.arc(0,0,e.r-2,0,Math.PI*2);
-    ctx.stroke();
-
-    ctx.restore();
-  }
-
-  // boss
-  if (GAME.boss){
-    const b = GAME.boss;
-    ctx.save();
-    ctx.translate(b.x, b.y);
-
-    ctx.shadowBlur = 28;
-    ctx.shadowColor = "rgba(255,0,80,.55)";
-    ctx.fillStyle = "rgba(255,0,80,.22)";
-    ctx.beginPath();
-    ctx.arc(0,0,b.r+14,0,Math.PI*2);
-    ctx.fill();
-
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "rgba(0,0,0,.25)";
-    ctx.beginPath();
-    ctx.arc(0,0,b.r,0,Math.PI*2);
-    ctx.fill();
-
-    ctx.strokeStyle = "rgba(0,242,234,.55)";
-    ctx.lineWidth = 3 * GAME.dpr;
-    ctx.beginPath();
-    ctx.arc(0,0,b.r-4,0,Math.PI*2);
-    ctx.stroke();
-
-    // HP bar
-    const hp = clamp(b.hp / 45, 0, 1);
-    ctx.fillStyle = "rgba(0,0,0,.35)";
-    ctx.fillRect(-b.r, b.r+16, b.r*2, 8*GAME.dpr);
-    ctx.fillStyle = "rgba(255,0,80,.85)";
-    ctx.fillRect(-b.r, b.r+16, b.r*2*hp, 8*GAME.dpr);
-
-    ctx.restore();
-  }
-
-  // players
-  GAME.players.forEach((p) => {
-    ctx.save();
-    ctx.translate(p.x, p.y);
-
-    // shield ring
-    if (p.shield > 0){
-      const a = clamp(p.shield / 3, 0, 1);
-      ctx.strokeStyle = `rgba(0,242,234,${0.25 + a*0.55})`;
-      ctx.lineWidth = 3 * GAME.dpr;
-      ctx.beginPath();
-      ctx.arc(0,0,p.r+10,0,Math.PI*2);
-      ctx.stroke();
-    }
-
-    // core
-    ctx.shadowBlur = 18;
-    ctx.shadowColor = "rgba(0,242,234,.35)";
-    ctx.fillStyle = "rgba(0,242,234,.14)";
-    ctx.beginPath();
-    ctx.arc(0,0,p.r+6,0,Math.PI*2);
-    ctx.fill();
-
-    ctx.shadowBlur = 0;
-    ctx.fillStyle = "rgba(255,255,255,.88)";
-    ctx.beginPath();
-    ctx.arc(0,0,p.r,0,Math.PI*2);
-    ctx.fill();
-
-    // label
-    ctx.fillStyle = "rgba(247,247,251,.85)";
-    ctx.font = `${12*GAME.dpr}px ${getComputedStyle(document.body).fontFamily}`;
-    const nm = p.name.length > 12 ? p.name.slice(0,12) + "…" : p.name;
-    ctx.fillText(nm, -p.r, -p.r - 12*GAME.dpr);
-
-    ctx.restore();
-  });
-
-  // projectiles
-  for (let i=0;i<GAME.projectiles.length;i++){
-    const pr = GAME.projectiles[i];
-    ctx.save();
-    ctx.translate(pr.x, pr.y);
-
-    ctx.shadowBlur = 16;
-    ctx.shadowColor = "rgba(0,242,234,.35)";
-    ctx.fillStyle = "rgba(0,242,234,.95)";
-    ctx.beginPath();
-    ctx.arc(0,0,pr.r,0,Math.PI*2);
-    ctx.fill();
-
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = "rgba(255,0,80,.55)";
-    ctx.lineWidth = 2 * GAME.dpr;
-    ctx.beginPath();
-    ctx.arc(0,0,pr.r+1,0,Math.PI*2);
-    ctx.stroke();
-
-    ctx.restore();
-  }
-
-  // particles
-  for (let i=0;i<GAME.particles.length;i++){
-    const p = GAME.particles[i];
-    const k = 1 - (p.t / p.life);
-    ctx.save();
-    ctx.globalAlpha = k;
-    const col = (Math.random() < 0.5) ? p.a : p.b;
-    ctx.fillStyle = col;
-    ctx.beginPath();
-    ctx.arc(p.x, p.y, p.size * k * GAME.dpr, 0, Math.PI*2);
-    ctx.fill();
-    ctx.restore();
-  }
-}
-
-function loop(t){
-  if (!GAME.running) return;
-
-  if (!GAME.lastT) GAME.lastT = t;
-  const dt = clamp((t - GAME.lastT) / 1000, 0, 0.05);
-  GAME.lastT = t;
-
-  step(dt);
-  draw();
-
-  requestAnimationFrame(loop);
-}
-
-/* =========================================================
-   Connect flow (connect-first; start after connected)
-========================================================= */
-async function connectAndStart(liveId){
-  try{
-    const id = safeStr(liveId || "").trim().replace(/^@/,"");
-    if (!id) throw new Error("LIVE ID is required");
-
-    // Ensure proto exists (or fail gracefully)
-    const okProto = await ensureProtoReady();
-    if (!okProto){
-      setStatus("Missing proto. Preview must provide proto bundle(s). Game will run in demo mode.", false);
-      pushFlag("chat", { nickname: "System" }, "Proto missing — running demo only.", "tint-dark");
-      return;
-    }
-
-    if (!hasTikTokClient()){
-      setStatus("TikTokClient missing. Game will run in demo mode.", false);
-      pushFlag("chat", { nickname: "System" }, "TikTokClient missing — running demo only.", "tint-dark");
-      return;
-    }
-
-    // close previous
-    if (client && client.socket){
-      try{ client.socket.close(); }catch{}
-    }
-
-    client = new window.TikTokClient(id);
-
-    if (typeof window.CHATTOK_CREATOR_TOKEN !== "undefined" && window.CHATTOK_CREATOR_TOKEN){
-      client.setAccessToken(window.CHATTOK_CREATOR_TOKEN);
-    }
-
-    client.on("connected", () => {
-      GAME.connected = true;
-      setStatus("Connected to TikTok LIVE.", true);
+    // Only start game once we know we're connected
+    if (pendingStart) {
+      pendingStart = false;
       hideOverlay();
-      gameStarted = true;
-      pendingStart = false;
-      pushFlag("chat", { nickname: "System" }, "Connected — chat now controls the arena!", "tint-aqua");
-    });
+    }
+  });
 
-    client.on("disconnected", (reason) => {
-      GAME.connected = false;
-      const msg = reason || "Connection closed";
-      setStatus("Disconnected: " + msg, false);
+  client.on("disconnected", (reason) => {
+    console.log("Disconnected from TikTok hub:", reason);
+    state.connected = false;
 
-      // allow retry if never fully started
-      if (!gameStarted){
-        pendingStart = false;
-        showOverlay();
-      }
-    });
+    const msg = reason || "Connection closed";
+    setStatus("Disconnected: " + msg, false);
 
-    client.on("error", (err) => {
-      GAME.connected = false;
-      setStatus("Error: " + (err && err.message ? err.message : "Unknown"), false);
+    flag({ who: "SYSTEM", msg: "Disconnected: " + msg, pfp: "", tint: "tint-warn" });
+
+    if (!pendingStart) {
+      // keep overlay open so host can retry
       showOverlay();
+    } else {
       pendingStart = false;
-    });
+      showOverlay();
+    }
+  });
 
-    // Hook Orb Arena handlers (not the reference snippet)
-    client.on("chat", orbOnChatMessage);
-    client.on("gift", orbOnGiftMessage);
-    client.on("like", orbOnLikeMessage);
-
-    pendingStart = true;
-    setStatus("Connecting…", false);
-    client.connect();
-  }catch(e){
-    console.error(e);
+  client.on("error", (err) => {
+    console.error("TikTok client error:", err);
+    state.connected = false;
     pendingStart = false;
-    setStatus(e?.message || String(e), false);
+    const m = err && err.message ? err.message : "Unknown";
+    setStatus("Error: " + m, false);
+    flag({ who: "SYSTEM", msg: "Error: " + m, pfp: "", tint: "tint-warn" });
+    showOverlay();
+  });
+
+  client.on("chat", onChatMessage);
+  client.on("gift", onGiftMessage);
+
+  client.on("like", (data) => {
+    try {
+      const l = normalizeLike(data);
+      likeBoost(l.count);
+
+      // throttle flags
+      const now = Date.now();
+      if (!state._lastLikeFlagAt) state._lastLikeFlagAt = 0;
+      if (now - state._lastLikeFlagAt > 1200) {
+        state._lastLikeFlagAt = now;
+        const u = getUserFromMessage(data);
+        flag({ who: u.nickname || u.uniqueId || "viewer", msg: `liked ×${l.count}`, pfp: u.avatar, tint: "tint-aqua" });
+      }
+
+      try { if (typeof aiOnLike === "function") aiOnLike(state, l); } catch(e){}
+    } catch (e) {
+      console.error("Error in like handler:", e);
+    }
+  });
+
+  client.on("join", (data) => {
+    try {
+      const u = getUserFromMessage(data);
+      // Join event can optionally count as join action (AI can decide)
+      state.counters.joins++;
+      flag({ who: u.nickname || u.uniqueId || "viewer", msg: "joined", pfp: u.avatar, tint: "tint-good" });
+      try { if (typeof aiOnJoin === "function") aiOnJoin(state, { user: u }); } catch(e){}
+    } catch(e){}
+  });
+
+  // Share support (if TikTokClient emits it)
+  client.on("share", (data) => {
+    try {
+      const u = getUserFromMessage(data);
+      state.counters.shares++;
+      flag({ who: u.nickname || u.uniqueId || "viewer", msg: "shared", pfp: u.avatar, tint: "tint-pink" });
+
+      // Optional: share as fallback for chat commands
+      const s = state.settings || {};
+      const mode = String(s.shareCountsAs || "action");
+      const allow = !!s.shareAsAction;
+
+      if (allow) {
+        if (mode === "action") {
+          actionAttack(u, 3);
+        } else if (mode === "join") {
+          joinAction(u);
+        } else if (mode === "hype") {
+          addHype(0.18);
+        }
+      }
+
+      try { if (typeof aiOnShare === "function") aiOnShare(state, { user: u }); } catch(e){}
+    } catch (e) {
+      console.error("Error in share handler:", e);
+    }
+  });
+
+  client.connect();
+}
+
+/* ============================================================
+   Message helpers (robust across shapes)
+   ============================================================ */
+function getUserFromMessage(msg) {
+  const m = msg || {};
+  const u = m.user || m.userInfo || m.author || m.sender || m.user_id || m.userId || {};
+  const userId = String(u.userId || u.id || m.userId || m.user_id || "");
+  const nickname = String(u.nickname || u.displayName || u.uniqueId || u.displayid || u.displayId || u.username || "");
+  const uniqueId = String(u.uniqueId || u.unique_id || u.displayid || u.displayId || u.username || nickname || "");
+  const avatar = getAvatarUrlFromUser(u);
+  return { userId, nickname, uniqueId, avatar };
+}
+
+function getAvatarUrlFromUser(u) {
+  const x = u || {};
+  const p =
+    x.avatarThumb ||
+    x.avatar_thumb ||
+    x.avatarMedium ||
+    x.avatar_medium ||
+    x.avatarLarge ||
+    x.avatar_large ||
+    x.avatar ||
+    x.profilePicture ||
+    x.profile_picture ||
+    "";
+  if (typeof p === "string") return p;
+  if (p && typeof p === "object") {
+    if (Array.isArray(p.urlList) && p.urlList[0]) return String(p.urlList[0]);
+    if (Array.isArray(p.url_list) && p.url_list[0]) return String(p.url_list[0]);
+    if (p.url) return String(p.url);
+  }
+  return "";
+}
+
+function getChatTextFromMessage(msg) {
+  const m = msg || {};
+  const t = m.comment || m.text || m.message || m.msg || m.content || m.chat || "";
+  if (typeof t === "string") return t;
+  return String(t || "");
+}
+
+function normalizeLike(m) {
+  const mm = m || {};
+  const c = Number(mm.likeCount || mm.count || mm.likes || 1) || 1;
+  return { type: "like", count: c };
+}
+
+function normalizeGift(m) {
+  const mm = m || {};
+  const giftName = String(mm.giftName || (mm.gift && mm.gift.name) || mm.name || "gift");
+  const repeat = Number(mm.repeatCount || mm.repeat || mm.count || 1) || 1;
+  return { type: "gift", giftName, repeat };
+}
+
+/* ============================================================
+   Command parsing (host configurable)
+   ============================================================ */
+function normalizeJoinText(text) {
+  const s = state.settings || {};
+  const joinCmd = String(s.joinCommand || "join").toLowerCase();
+  const t = String(text || "").trim().toLowerCase();
+
+  // allow "join", "!join", "/join"
+  if (t === joinCmd) return true;
+  if (t === "!" + joinCmd) return true;
+  if (t === "/" + joinCmd) return true;
+
+  // allow share-workaround in chat if host wants (some viewers use "share" in chat)
+  if (t === "share" && String(s.shareCountsAs || "") === "join") return true;
+  return false;
+}
+
+function normalizeActionText(text) {
+  const s = state.settings || {};
+  const actCmd = String(s.actionCommand || "attack").toLowerCase();
+  const t = String(text || "").trim().toLowerCase();
+
+  if (t === actCmd) return true;
+  if (t === "!" + actCmd) return true;
+  if (t === "/" + actCmd) return true;
+
+  // allow "share" typed in chat to count as action if desired
+  if (t === "share" && String(s.shareCountsAs || "") === "action") return true;
+
+  return false;
+}
+
+/* ============================================================
+   Start / flow
+   ============================================================ */
+function startOffline() {
+  hideOverlay();
+  setStatus("Disconnected (Offline Mode)", false);
+  flag({ who: "SYSTEM", msg: "Offline Mode: game is running without TikTok connection", pfp: "", tint: "tint-warn" });
+}
+
+function beginStart() {
+  ensureCoreSettingsUI();
+  readSettings(); // always update settings on start click
+
+  // Always ensure game is mounted/running (even if connection fails)
+  mountCanvas();
+  try { if (typeof aiInit === "function") aiInit(state); } catch(e){}
+
+  const liveId = String(liveIdInput && liveIdInput.value ? liveIdInput.value : "").trim().replace(/^@/,"");
+  if (!liveId) {
+    // allow offline start
+    startOffline();
+    return;
+  }
+
+  pendingStart = true;
+  setStatus("Connecting…", false);
+  try {
+    setupTikTokClient(liveId);
+  } catch (e) {
+    pendingStart = false;
+    setStatus("Error: " + (e && e.message ? e.message : "Connection failed"), false);
     showOverlay();
   }
 }
 
-/* =========================================================
-   AI REGION (server may inject compact mechanics here)
-   KEEP IT SMALL: only add/adjust commands, balance, visuals.
-========================================================= */
-/* === AI_REGION_START === */
-/*
-  AI: You may only modify code inside this region.
-  Goals:
-  - Add 2–4 additional chat commands that create visible actions.
-  - Make likes/gifts feel impactful (without spamming flags).
-  - Keep everything safe + stable (no DOM assumptions beyond IDs).
-  - Do NOT add debug buttons.
+/* ============================================================
+   AI REGION
+   - The builder inserts game-specific code here.
+   - MUST define: aiInit, aiOnChat, aiOnLike, aiOnGift
+   - Optional: aiOnShare, aiOnJoin
+   ============================================================ */
+// === AI_REGION_START ===
 
-  Example additions:
-  - "!dash" -> quick player boost
-  - "!spawn" -> spawn a wave
-  - "meteor" -> call down meteors
-*/
-/* === AI_REGION_END === */
+function aiInit(state) {
+  // Default: nothing extra needed. Canvas engine already runs.
+}
 
-/* =========================================================
-   Start
-========================================================= */
-function start(){
-  try{
-    readSpecSettings();
-    makeStage();
-    initStars();
-    resetRun();
+function aiOnChat(state, ev) {
+  // Default: no extra routing.
+  // You can add more commands here, but ALWAYS make them host-configurable
+  // by reading state.settings and/or adding a new setting field with ensureSettingField().
+}
 
-    // Always start the loop immediately (demo visible behind overlay)
-    GAME.running = true;
-    requestAnimationFrame(loop);
+function aiOnLike(state, like) {
+  // Default: likes already fill hype meter via likeBoost().
+}
 
+function aiOnGift(state, gift) {
+  // Default: gifts already trigger giftPower().
+}
+
+// Optional
+function aiOnShare(state, share) {
+  // Default: share behavior is handled by settings in the share event.
+}
+
+// === AI_REGION_END ===
+
+/* ============================================================
+   Boot
+   ============================================================ */
+(function boot() {
+  try {
+    // Show overlay until start
     showOverlay();
     setStatus("Not connected", false);
 
-    // Button: connect-first
-    if (startGameBtn){
-      startGameBtn.addEventListener("click", async () => {
-        try{
-          const liveId = liveIdInput ? liveIdInput.value : "";
-          await connectAndStart(liveId);
-        }catch(e){
-          setStatus(e?.message || "Failed to start", false);
-        }
+    // Ensure configurable settings exist even if server didn’t inject fields
+    ensureCoreSettingsUI();
+    readSettings();
+
+    // Mount game immediately so it never looks blank
+    mountCanvas();
+    try { if (typeof aiInit === "function") aiInit(state); } catch(e){}
+
+    if (startGameBtn) {
+      startGameBtn.addEventListener("click", () => {
+        // Refresh settings right before starting
+        beginStart();
       });
     }
 
-    // Light heartbeat flags for demo so it never feels dead
-    setTimeout(() => {
-      pushFlag("chat", { nickname:"System" }, "Type JOIN to enter • SHOOT / SHIELD / BOMB", "tint-dark");
-    }, 700);
-
-  }catch(e){
-    console.error(e);
-    setStatus("Startup error: " + (e?.message || String(e)), false);
-    showOverlay();
+    // Helpful first banner so host sees motion instantly
+    flag({ who: "SYSTEM", msg: "Game ready. Set commands, then Connect & Start.", pfp: "", tint: "tint-aqua" });
+  } catch (e) {
+    console.error("boot error", e);
+    setStatus("Error starting game", false);
   }
-}
-
-if (document.readyState === "loading"){
-  document.addEventListener("DOMContentLoaded", start);
-}else{
-  start();
-}
+})();

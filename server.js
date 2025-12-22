@@ -1,60 +1,96 @@
-"use strict";
+/* server.js — ChatTok Builder API (template-first)
+   Fixes:
+   - Works whether templates live in /templates OR repo root
+   - Single app.listen (no HOST undefined, no double listen)
+   - CORS preflight (OPTIONS) works for GitHub Pages
+   - CSS stage does NOT require "idea" text
+   - Better template reload + diagnostics
+*/
 
 const express = require("express");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
 const fs = require("fs");
 const path = require("path");
 
-// Optional dotenv (local dev). Render uses env vars; this prevents crashes if dotenv isn't installed.
-try {
-  require("dotenv").config();
-} catch (_) {}
+// dotenv is optional in Render (Render injects env vars), but useful locally
+try { require("dotenv").config(); } catch {}
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || "0.0.0.0";
 
-/* =========================================================
-   CORS
-   - If ALLOWED_ORIGINS is empty => allow all (dev-friendly)
-   - If ALLOWED_ORIGINS is set => allow only those origins
-   Example Render env:
-     ALLOWED_ORIGINS=https://ogdeig.github.io,https://yourdomain.com
-========================================================= */
+// Node 18+ required for global fetch (OpenAI)
+if (typeof fetch !== "function") {
+  console.error("ERROR: global fetch is missing. Use Node 18+ (Render Node 20+ is fine).");
+  process.exit(1);
+}
+
+// -----------------------------
+// Security / rate limit (light)
+// -----------------------------
+app.set("trust proxy", 1);
+
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+  })
+);
+
+// -----------------------------
+// CORS
+// -----------------------------
 const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-app.use(
-  cors({
-    origin(origin, cb) {
-      if (!origin) return cb(null, true);
-      if (allowedOrigins.length === 0) return cb(null, true);
-      if (allowedOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error(`CORS blocked origin: ${origin}`), false);
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
-    maxAge: 86400,
-  })
-);
+const corsOptions = {
+  origin(origin, cb) {
+    // allow server-to-server, curl, etc.
+    if (!origin) return cb(null, true);
 
-app.options("*", cors());
+    // If you don't set ALLOWED_ORIGINS, we allow all (dev-friendly).
+    if (allowedOrigins.length === 0) return cb(null, true);
+
+    // Otherwise, strict allowlist
+    if (allowedOrigins.includes(origin)) return cb(null, true);
+
+    // Block
+    return cb(new Error(`CORS blocked origin: ${origin}`), false);
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+// Explicitly handle preflight for all routes:
+app.options("*", cors(corsOptions));
+
+// Nice JSON response if CORS blocks
+app.use((err, _req, res, next) => {
+  if (err && String(err.message || "").startsWith("CORS blocked origin")) {
+    return res.status(403).json({ ok: false, error: err.message });
+  }
+  return next(err);
+});
+
 app.get("/favicon.ico", (_req, res) => res.status(204).end());
 
-/* =========================================================
-   Helpers
-========================================================= */
+// -----------------------------
+// Helpers
+// -----------------------------
 function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
 
 function normalizeStage(stage) {
   const s = String(stage || "").toLowerCase().trim();
-  if (s === "spec" || s === "plan") return "spec";
   if (s === "html" || s === "index" || s === "index.html") return "html";
   if (s === "css" || s === "style" || s === "style.css") return "css";
   if (s === "js" || s === "game" || s === "game.js") return "js";
@@ -78,6 +114,15 @@ function stripCodeFences(s) {
   lines.shift();
   if (lines.length && lines[lines.length - 1].trim().startsWith("```")) lines.pop();
   return lines.join("\n").trim();
+}
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
 }
 
 function extractAssistantText(resp) {
@@ -111,35 +156,33 @@ function parseJsonLoose(rawText) {
   }
 }
 
-function escapeHtml(s) {
-  return String(s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-/* =========================================================
-   Template resolution
-   Your current structure is ROOT:
-     index.template.html
-     style.template.css
-     game.template.js
-========================================================= */
+// -----------------------------
+// Templates (root-friendly resolver)
+// -----------------------------
 function resolveTemplatePath(fileName) {
+  const cwd = process.cwd();
   const candidates = [
-    path.join(process.cwd(), fileName),
-    path.join(process.cwd(), "templates", fileName),
+    // 1) Root (your current setup)
+    path.join(cwd, fileName),
+
+    // 2) /templates
+    path.join(cwd, "templates", fileName),
+
+    // 3) If API is inside /api on some setups
+    path.join(cwd, "api", fileName),
+    path.join(cwd, "api", "templates", fileName),
+
+    // 4) __dirname fallbacks
     path.join(__dirname, fileName),
     path.join(__dirname, "templates", fileName),
-    path.join(process.cwd(), "api", fileName),
-    path.join(process.cwd(), "api", "templates", fileName),
+    path.join(__dirname, "api", fileName),
+    path.join(__dirname, "api", "templates", fileName),
   ];
+
   for (const p of candidates) {
     try {
       if (fs.existsSync(p)) return p;
-    } catch (_) {}
+    } catch {}
   }
   return "";
 }
@@ -150,56 +193,28 @@ function readTemplate(fileName) {
   return fs.readFileSync(p, "utf8");
 }
 
-function safeLoadTemplates() {
-  const out = { index: "", css: "", game: "" };
-  try {
-    out.index = readTemplate("index.template.html");
-  } catch (e) {
-    console.error("[templates] missing index.template.html:", e.message);
-  }
-  try {
-    out.css = readTemplate("style.template.css");
-  } catch (e) {
-    console.error("[templates] missing style.template.css:", e.message);
-  }
-  try {
-    out.game = readTemplate("game.template.js");
-  } catch (e) {
-    console.error("[templates] missing game.template.js:", e.message);
-  }
-  return out;
+function loadTemplates() {
+  return {
+    index: readTemplate("index.template.html"),
+    css: readTemplate("style.template.css"),
+    game: readTemplate("game.template.js"),
+  };
 }
 
-let TEMPLATES = safeLoadTemplates();
+let TEMPLATES = loadTemplates();
 
 app.post("/api/reload-templates", (_req, res) => {
-  TEMPLATES = safeLoadTemplates();
-  res.json({
-    ok: true,
-    templates: { index: !!TEMPLATES.index, css: !!TEMPLATES.css, game: !!TEMPLATES.game },
-  });
+  try {
+    TEMPLATES = loadTemplates();
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
 });
 
-/* =========================================================
-   Template auto-pick (cheap heuristics)
-========================================================= */
-function autoPickTemplateIdFromIdea(idea) {
-  const t = String(idea || "").toLowerCase();
-  const has = (arr) => arr.some((w) => t.includes(w));
-
-  if (has(["asteroid", "space", "ship", "ufo", "meteor", "shooter"])) return "asteroids";
-  if (has(["runner", "endless", "jump", "platform", "obstacle"])) return "runner";
-  if (has(["trivia", "quiz", "question", "answer", "multiple choice"])) return "trivia";
-  if (has(["wheel", "spin", "roulette", "picker", "random winner"])) return "wheel";
-  if (has(["arena", "battle", "brawl", "eliminate", "pvp", "royale"])) return "arena";
-  if (has(["boss", "raid", "hp bar", "health bar", "damage", "attack"])) return "bossraid";
-
-  return "bossraid";
-}
-
-/* =========================================================
-   Theme injection (CSS ONLY)
-========================================================= */
+// -----------------------------
+// Theme injection (CSS ONLY)
+// -----------------------------
 function normalizeHex(input) {
   const s = String(input || "").trim();
   if (!s) return "";
@@ -240,12 +255,10 @@ function injectThemeVars(cssText, theme) {
   return out;
 }
 
-/* =========================================================
-   OpenAI (Responses API)
-========================================================= */
+// -----------------------------
+// OpenAI (Responses API)
+// -----------------------------
 async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt }) {
-  assert(typeof fetch === "function", "global fetch missing. Use Node 18+.");
-
   const payload = {
     model,
     max_output_tokens: maxOutputTokens,
@@ -255,7 +268,10 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt }) {
 
   const r = await fetch("https://api.openai.com/v1/responses", {
     method: "POST",
-    headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
     body: JSON.stringify(payload),
   });
 
@@ -270,38 +286,28 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt }) {
   return data;
 }
 
-/* =========================================================
-   SPEC (plan-only) generation
-   - includeHostControls: optional
-   - templateId: chosen from allowlist
-========================================================= */
-async function generateSpec({ apiKey, model, idea, templateIdHint }) {
+// -----------------------------
+// Spec + AI region generation
+// -----------------------------
+async function generateSpec({ apiKey, model, idea, templateId }) {
   const prompt = [
     "Return ONLY valid JSON. No markdown. No extra text.",
-    "Create a compact spec for a TikTok LIVE interactive game.",
-    "",
+    "Create a compact spec for a TikTok LIVE interactive game (template-first builder).",
     "Hard rules:",
-    "- The game must feel alive immediately: motion + HUD + obvious reactions.",
-    "- No dev/test buttons on the game screen. No debug UI.",
-    "- Use scoreboards/HUD and small transparent toasts/flags only.",
+    "- Must feel like a real game even before connect (characters + HUD + motion).",
     "- Define viewer interactions for chat/like/gift/join.",
-    "- Settings must stay minimal: roundSeconds and winGoal only.",
+    "- Keep settings minimal: roundSeconds and winGoal only.",
     "",
-    "Pick templateId from this list ONLY:",
-    '["asteroids","runner","trivia","wheel","arena","bossraid"]',
+    `Template hint: ${templateId}`,
     "",
     "JSON shape:",
     "{",
-    '  "templateId":"one of the allowed template IDs",',
-    '  "includeHostControls": true/false,',
     '  "title":"string",',
     '  "subtitle":"string",',
     '  "oneSentence":"string",',
-    '  "howToPlay":["string","string","string"],',
+    '  "howToPlay":["string","string","string","..."],',
     '  "defaultSettings":{"roundSeconds":number,"winGoal":number}',
     "}",
-    "",
-    `Template hint: ${templateIdHint || ""}`,
     "",
     "Game idea:",
     idea,
@@ -310,7 +316,7 @@ async function generateSpec({ apiKey, model, idea, templateIdHint }) {
   const raw = await callOpenAIResponses({
     apiKey,
     model,
-    maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_SPEC || 800),
+    maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_SPEC || 700),
     prompt,
   });
 
@@ -320,25 +326,17 @@ async function generateSpec({ apiKey, model, idea, templateIdHint }) {
     const raw2 = await callOpenAIResponses({
       apiKey,
       model,
-      maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_SPEC || 800),
+      maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_SPEC || 700),
       prompt: repair,
     });
     parsed = parseJsonLoose(extractAssistantText(raw2));
   }
-
   assert(parsed.ok, "Spec generation failed (invalid JSON).");
+
   const spec = parsed.value || {};
-
-  const allowed = new Set(["asteroids", "runner", "trivia", "wheel", "arena", "bossraid"]);
-  spec.templateId = String(spec.templateId || "").trim().toLowerCase();
-  if (!allowed.has(spec.templateId)) spec.templateId = "";
-
-  spec.includeHostControls = !!spec.includeHostControls;
-
   spec.title = String(spec.title || "ChatTok Live Game").trim();
   spec.subtitle = String(spec.subtitle || "Live Interactive").trim();
   spec.oneSentence = String(spec.oneSentence || "Chat and gifts power up the action.").trim();
-
   spec.howToPlay = Array.isArray(spec.howToPlay) ? spec.howToPlay.map(String) : [];
   if (!spec.howToPlay.length) spec.howToPlay = ["Chat to interact.", "Likes add energy.", "Gifts trigger power-ups."];
 
@@ -349,39 +347,28 @@ async function generateSpec({ apiKey, model, idea, templateIdHint }) {
   return spec;
 }
 
-/* =========================================================
-   AI_REGION generation (safe)
-   IMPORTANT: we explicitly forbid dev/test buttons.
-========================================================= */
 function fallbackAiRegion() {
   return `
 function aiInit(ctx){
   renderBase();
   renderMeters();
-  ctx.ui.setStatus("Demo running — connect to TikTok to go live.");
-  ctx.ui.flag({ who:"SYSTEM", msg:"Chat triggers effects. Gifts = power-ups.", pfp:"" });
+  ctx.ui.flag({ who:"SYSTEM", msg:"Demo running — connect to TikTok to go live.", pfp:"" });
 }
-
 function aiOnChat(ctx, chat){
   if (!chat || !chat.text) return;
-  const nick = chat.nickname || "viewer";
-  const txt = String(chat.text).trim().slice(0, 60);
-  ctx.ui.flag({ who:nick, msg: "💬 " + txt, pfp: chat.pfp || "" });
-  // Visible reaction hook:
-  ctx.fx.pulse();
+  if (chat.text.toLowerCase().includes("boom")) {
+    ctx.ui.flag({ who: chat.nickname || "viewer", msg: "💥 BOOM!", pfp: chat.pfp || "" });
+  }
 }
-
 function aiOnLike(ctx, like){
-  if ((ctx.state.counters.likes % 50) === 0) ctx.ui.flag({ who:"SYSTEM", msg:"⚡ Likes surging!", pfp:"" });
-  ctx.fx.spark();
+  if ((ctx.state.counters.likes % 50) === 0) {
+    ctx.ui.flag({ who:"SYSTEM", msg:"Likes power rising ⚡", pfp:"" });
+  }
 }
-
 function aiOnGift(ctx, gift){
-  const nick = gift.nickname || "viewer";
-  ctx.ui.flag({ who:nick, msg:"🎁 Power-up!", pfp: gift.pfp || "" });
-  ctx.fx.burst();
+  ctx.ui.flag({ who: gift.nickname || "viewer", msg: "Gift power-up activated 🎁", pfp: gift.pfp || "" });
 }
-`.trim();
+  `.trim();
 }
 
 function sanitizeAiRegion(code) {
@@ -408,15 +395,13 @@ async function generateAiRegion({ apiKey, model, idea, spec, templateId, changeR
     "- aiOnLike(ctx, like)",
     "- aiOnGift(ctx, gift)",
     "",
-    "Critical rules:",
-    "- No dev/test buttons. No debug UI. No on-screen control panels unless includeHostControls is true.",
-    "- Toasts/flags must be small, transparent, and never block gameplay view.",
-    "- Use scoreboard/HUD updates and lightweight effects instead of controls.",
+    "Critical rules (DO NOT break):",
     "- Do NOT call ctx.on(...). ctx is NOT an event emitter.",
     "- Do NOT reference onConnect or ctx.onConnect.",
-    "- You can call: renderBase(), renderMeters(), ctx.ui.flag(...), ctx.ui.card(...), ctx.ui.setStatus(...), ctx.fx.* helpers if present.",
+    "- You can call: renderBase(), renderMeters(), ctx.ui.flag(...), ctx.ui.card(...), ctx.ui.setStatus(...).",
+    "- Keep it visually reactive + game-like.",
     "",
-    `Template: ${templateId}`,
+    `Template hint: ${templateId}`,
     "Spec JSON:",
     JSON.stringify(spec, null, 2),
     "",
@@ -426,19 +411,22 @@ async function generateAiRegion({ apiKey, model, idea, spec, templateId, changeR
   const raw = await callOpenAIResponses({
     apiKey,
     model,
-    maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_JS || 1500),
+    maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_JS || 1400),
     prompt,
   });
 
   const code = stripCodeFences(extractAssistantText(raw)).trim();
   const checked = sanitizeAiRegion(code);
-  if (!checked.ok) return fallbackAiRegion();
+  if (!checked.ok) {
+    console.warn("AI_REGION rejected:", checked.reason);
+    return fallbackAiRegion();
+  }
   return checked.code;
 }
 
-/* =========================================================
-   Injection
-========================================================= */
+// -----------------------------
+// Template injection
+// -----------------------------
 function replaceBetweenMarkers(fullText, startMarker, endMarker, replacement) {
   const a = fullText.indexOf(startMarker);
   const b = fullText.indexOf(endMarker);
@@ -453,12 +441,10 @@ function injectSpecIntoGameJs(gameTemplate, spec) {
   return String(gameTemplate || "").replace("__SPEC_JSON__", json);
 }
 
-/**
- * Enforce LOCKED token rule + CONNECT-FIRST
- */
 function enforceLockedTikTokAndConnectFirst(jsText) {
   let out = String(jsText || "");
 
+  // Enforce token only when non-empty
   out = out.replace(
     /client\.setAccessToken\(\s*window\.CHATTOK_CREATOR_TOKEN\s*\|\|\s*""\s*\)\s*;?/g,
     `
@@ -472,8 +458,10 @@ function enforceLockedTikTokAndConnectFirst(jsText) {
 `.trim()
   );
 
-  out = out.replace(/\n\s*hideOverlay\(\)\s*;\s*\n/g, "\n      // CONNECT-FIRST: keep overlay open until 'connected'\n");
+  // CONNECT-FIRST: prevent hiding overlay on Start click (template may call hideOverlay())
+  out = out.replace(/\n\s*hideOverlay\(\)\s*;\s*\n/g, "\n      // CONNECT-FIRST: keep overlay open until 'connected' event\n");
 
+  // CONNECT-FIRST: ensure we hide overlay when connected event fires
   if (!out.includes("CONNECT-FIRST: hide overlay on connected")) {
     out = out.replace(
       /ctx\.connected\s*=\s*true\s*;\s*\n/g,
@@ -484,9 +472,9 @@ function enforceLockedTikTokAndConnectFirst(jsText) {
   return out;
 }
 
-/* =========================================================
-   index.template.html rendering helpers
-========================================================= */
+// -----------------------------
+// HTML rendering (index.template.html)
+// -----------------------------
 function renderSettingsFieldsHtml(spec) {
   const round = Number(spec?.defaultSettings?.roundSeconds || 20);
   const goal = Number(spec?.defaultSettings?.winGoal || 100);
@@ -506,7 +494,10 @@ function renderSettingsFieldsHtml(spec) {
 
 function renderHowToLi(spec) {
   const items = Array.isArray(spec?.howToPlay) ? spec.howToPlay : [];
-  return items.slice(0, 10).map((x) => `<li>${escapeHtml(String(x || ""))}</li>`).join("\n");
+  return items
+    .slice(0, 10)
+    .map((x) => `<li>${escapeHtml(String(x || ""))}</li>`)
+    .join("\n");
 }
 
 function renderIndexHtml(indexTemplate, spec) {
@@ -519,9 +510,20 @@ function renderIndexHtml(indexTemplate, spec) {
   return html;
 }
 
-/* =========================================================
-   Validations (cheap, strict)
-========================================================= */
+// -----------------------------
+// Validations
+// -----------------------------
+function validateGeneratedHtml(html) {
+  const requiredIds = ["setupOverlay", "startGameBtn", "liveIdInput", "gameRoot", "flags"];
+  for (const id of requiredIds) {
+    if (!html.includes(`id="${id}"`) && !html.includes(`id='${id}'`)) {
+      throw new Error(`index.html missing required id: ${id}`);
+    }
+  }
+  const matches = html.match(/id\s*=\s*["']liveIdInput["']/g) || [];
+  if (matches.length !== 1) throw new Error(`index.html must have exactly 1 liveIdInput (found ${matches.length})`);
+}
+
 function validateGeneratedCss(css) {
   if (!css.includes(":root")) throw new Error("style.css missing :root block");
   if (!css.includes("--pink") || !css.includes("--aqua")) throw new Error("style.css missing theme vars (--pink/--aqua)");
@@ -533,68 +535,73 @@ function validateGeneratedJs(js) {
     throw new Error("game.js missing AI_REGION markers");
   }
   if (js.includes("setAccessToken(window.CHATTOK_CREATOR_TOKEN")) {
-    throw new Error("game.js violates token rule");
+    throw new Error("game.js violates token rule (setAccessToken called without non-empty check)");
   }
 }
 
-/* =========================================================
-   POST /api/generate
-   stages: spec -> html -> css -> js
-========================================================= */
+// -----------------------------
+// Routes
+// -----------------------------
+app.get("/health", (_req, res) => {
+  res.json({
+    ok: true,
+    service: "builder-api",
+    endpoints: ["GET /health", "POST /api/generate", "POST /api/edit", "POST /api/reload-templates"],
+    cors: { allowedOrigins: allowedOrigins.length ? allowedOrigins : "(dev default: allow all)" },
+    templates: {
+      index: !!TEMPLATES.index,
+      css: !!TEMPLATES.css,
+      game: !!TEMPLATES.game,
+    },
+  });
+});
+
+// POST /api/generate
 app.post("/api/generate", async (req, res) => {
   try {
     const stage = normalizeStage(req.body?.stage);
-    assert(stage, "Missing/invalid stage. Use: spec, html, css, js.");
+    const wantBundle = !stage;
 
     const idea = pickIdea(req.body);
+    const templateId = String(req.body?.templateId || req.body?.template || "boss").trim().toLowerCase();
     const theme = req.body?.theme || req.body?.colors || {};
     const ctx = req.body?.context && typeof req.body.context === "object" ? req.body.context : {};
     const ctxSpec = ctx.spec || null;
 
-    // Choose template:
-    let templateId = String(req.body?.templateId || req.body?.template || "").trim().toLowerCase();
-    if (!templateId && ctxSpec?.templateId) templateId = String(ctxSpec.templateId).trim().toLowerCase();
-    if (!templateId && idea) templateId = autoPickTemplateIdFromIdea(idea);
-    if (!templateId) templateId = "bossraid";
-
-    // CSS stage: no OpenAI and no idea needed
-    if (stage === "css") {
-      assert(TEMPLATES.css, "CSS template missing: style.template.css");
+    // ✅ CSS stage never needs idea (theme-only)
+    if (!wantBundle && stage === "css") {
       const css = injectThemeVars(TEMPLATES.css, theme);
       validateGeneratedCss(css);
-      return res.json({ ok: true, stage, file: { name: "style.css", content: css }, context: { spec: ctxSpec, templateId } });
+      return res.json({
+        ok: true,
+        stage,
+        file: { name: "style.css", content: css },
+        context: { spec: ctxSpec, templateId },
+      });
     }
 
-    // spec/html/js require OpenAI key
+    // HTML/JS/BUNDLE require idea
+    assert(idea || wantBundle, "Missing idea text.");
+    assert(idea, "Missing idea text."); // bundle/html/js should all have it
+
+    // OpenAI key required for html/js
     const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
-    assert(apiKey, "OPENAI_API_KEY is blank/missing in Render env vars.");
+    assert(apiKey, "OPENAI_API_KEY is blank/missing in Render Environment Variables.");
+
     const modelSpec = String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim();
     const modelJs = String(process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
 
-    // Spec stage (plan only)
-    if (stage === "spec") {
-      assert(idea, "Missing idea text.");
-      const spec = await generateSpec({ apiKey, model: modelSpec, idea, templateIdHint: templateId });
-      // prefer the spec template if valid
-      if (spec.templateId) templateId = spec.templateId;
-      return res.json({ ok: true, stage, spec, context: { spec, templateId } });
-    }
-
     // HTML stage
-    if (stage === "html") {
-      assert(TEMPLATES.index, "HTML template missing: index.template.html");
-      const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateIdHint: templateId }));
-      if (spec.templateId) templateId = spec.templateId;
+    if (!wantBundle && stage === "html") {
+      const spec = await generateSpec({ apiKey, model: modelSpec, idea, templateId });
       const html = renderIndexHtml(TEMPLATES.index, spec);
+      validateGeneratedHtml(html);
       return res.json({ ok: true, stage, file: { name: "index.html", content: html }, context: { spec, templateId } });
     }
 
     // JS stage
-    if (stage === "js") {
-      assert(TEMPLATES.game, "JS template missing: game.template.js");
-      const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateIdHint: templateId }));
-      if (spec.templateId) templateId = spec.templateId;
-
+    if (!wantBundle && stage === "js") {
+      const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateId }));
       const aiCode = await generateAiRegion({ apiKey, model: modelJs, idea, spec, templateId });
 
       let js = injectSpecIntoGameJs(TEMPLATES.game, spec);
@@ -605,7 +612,28 @@ app.post("/api/generate", async (req, res) => {
       return res.json({ ok: true, stage, file: { name: "game.js", content: js }, context: { spec, templateId } });
     }
 
-    throw new Error("Invalid stage.");
+    // Bundle mode
+    const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateId }));
+    const html = renderIndexHtml(TEMPLATES.index, spec);
+    const css = injectThemeVars(TEMPLATES.css, theme);
+    const aiCode = await generateAiRegion({ apiKey, model: modelJs, idea, spec, templateId });
+
+    let js = injectSpecIntoGameJs(TEMPLATES.game, spec);
+    js = replaceBetweenMarkers(js, "// === AI_REGION_START ===", "// === AI_REGION_END ===", aiCode);
+    js = enforceLockedTikTokAndConnectFirst(js);
+
+    validateGeneratedHtml(html);
+    validateGeneratedCss(css);
+    validateGeneratedJs(js);
+
+    return res.json({
+      ok: true,
+      stage: "bundle",
+      index_html: html,
+      style_css: css,
+      game_js: js,
+      context: { spec, templateId },
+    });
   } catch (err) {
     console.error("/api/generate error:", err);
     return res.status(err.status || 500).json({
@@ -616,10 +644,7 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-/* =========================================================
-   POST /api/edit
-   - regenerates ONLY AI_REGION safely
-========================================================= */
+// POST /api/edit (v1)
 app.post("/api/edit", async (req, res) => {
   try {
     const remaining = Number(req.body?.remainingEdits ?? 0);
@@ -631,14 +656,12 @@ app.post("/api/edit", async (req, res) => {
     const currentFiles = req.body?.currentFiles && typeof req.body.currentFiles === "object" ? req.body.currentFiles : {};
     const currentCss = String(currentFiles["style.css"] || "");
     const currentJs = String(currentFiles["game.js"] || "");
-    assert(currentJs, "Missing current game.js in currentFiles.");
 
-    const templateId = String(req.body?.templateId || "bossraid").trim().toLowerCase();
+    const templateId = String(req.body?.templateId || "boss").trim().toLowerCase();
     const theme = req.body?.theme || req.body?.colors || {};
 
-    // Theme shortcut (optional)
+    // Theme shortcut
     if (/\b(theme|color|colour|primary|secondary|background)\b/i.test(changeRequest)) {
-      assert(TEMPLATES.css, "CSS template missing: style.template.css");
       const css = injectThemeVars(TEMPLATES.css, theme);
       validateGeneratedCss(css);
       return res.json({
@@ -650,10 +673,9 @@ app.post("/api/edit", async (req, res) => {
     }
 
     const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
-    assert(apiKey, "OPENAI_API_KEY is blank/missing in Render env vars.");
-    const modelJs = String(process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
+    assert(apiKey, "OPENAI_API_KEY is blank/missing in Render Environment Variables.");
 
-    // Recover spec from const SPEC if present
+    // Recover spec from const SPEC if possible
     let spec = null;
     const specMatch = currentJs.match(/const\s+SPEC\s*=\s*(\{[\s\S]*?\});/m);
     if (specMatch && specMatch[1]) {
@@ -662,8 +684,6 @@ app.post("/api/edit", async (req, res) => {
     }
     if (!spec) {
       spec = {
-        templateId,
-        includeHostControls: false,
         title: "ChatTok Live Game",
         subtitle: "Live Interactive",
         oneSentence: "Chat and gifts power up the action.",
@@ -672,14 +692,8 @@ app.post("/api/edit", async (req, res) => {
       };
     }
 
-    const aiCode = await generateAiRegion({
-      apiKey,
-      model: modelJs,
-      idea: "",
-      spec,
-      templateId,
-      changeRequest,
-    });
+    const modelJs = String(process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
+    const aiCode = await generateAiRegion({ apiKey, model: modelJs, idea: "", spec, templateId, changeRequest });
 
     let newJs = replaceBetweenMarkers(currentJs, "// === AI_REGION_START ===", "// === AI_REGION_END ===", aiCode);
     newJs = enforceLockedTikTokAndConnectFirst(newJs);
@@ -702,27 +716,14 @@ app.post("/api/edit", async (req, res) => {
   }
 });
 
-/* =========================================================
-   Health
-========================================================= */
-app.get("/health", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "builder-api",
-    endpoints: ["GET /health", "POST /api/generate", "POST /api/edit", "POST /api/reload-templates"],
-    cors: { allowedOrigins: allowedOrigins.length ? allowedOrigins : "(dev: allow all)" },
-    templates: { index: !!TEMPLATES.index, css: !!TEMPLATES.css, game: !!TEMPLATES.game },
-    models: {
-      spec: process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini",
-      js: process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini",
-    },
-  });
-});
-
-/* =========================================================
-   START
-========================================================= */
-app.listen(PORT, HOST, () => {
-  console.log(`Builder API running: http://${HOST}:${PORT}`);
+// -----------------------------
+// Start server (single listen)
+// -----------------------------
+app.listen(PORT, () => {
+  console.log(`Builder API running on port ${PORT}`);
   console.log(`Allowed origins: ${allowedOrigins.join(", ") || "(dev default: allow all)"}`);
+  try {
+    const p = resolveTemplatePath("index.template.html");
+    console.log(`index.template.html resolved: ${p || "(NOT FOUND)"}`);
+  } catch {}
 });

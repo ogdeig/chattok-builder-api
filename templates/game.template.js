@@ -1,1325 +1,1227 @@
-/* game.js (template-first, production)
-   ============================================================
-   Non-Negotiables honored:
-   - DO NOT edit / bundle tiktok-client.js here (ChatTok injects it).
-   - DO NOT load proto.bundle.js here (index.html handles contract checks).
-   - Works in iframe/srcdoc runners (index.template.html sets <base>).
-   - Game shows action immediately even without TikTok connected.
-   - AI fills ONLY the AI_REGION between markers.
+/* =========================================================
+   game.template.js — ChatTok Gaming “Epic First Shot” Template
+   - Production-ready, works even WITHOUT TikTok connected (demo mode).
+   - Uses platform-injected TikTokClient + proto (DO NOT load them here).
+   - Robust for iframe/srcdoc preview runners.
+   - Provides flexible host settings for chat commands + optional shares mapping.
 
-   THIS TEMPLATE ALSO BUILDS HOST SETTINGS FIELDS DYNAMICALLY
-   so “chat commands” (and optional Share-as-fallback) are always configurable.
-*/
+   IMPORTANT NON-NEGOTIABLES:
+   - DO NOT change tiktok-client.js (platform provides it).
+   - DO NOT load proto.bundle.js here. HTML checks injection; we fail gracefully.
+   - Keep costs low: the template is already a complete game.
+========================================================= */
 
-// This constant is injected server-side.
-const SPEC = __SPEC_JSON__;
+(() => {
+  "use strict";
 
-/* ---------------- DOM ---------------- */
-const setupOverlay = document.getElementById("setupOverlay");
-const gameScreen = document.getElementById("gameScreen");
-const liveIdInput = document.getElementById("liveIdInput");
-const startGameBtn = document.getElementById("startGameBtn");
-const statusText = document.getElementById("statusText");
-const statusTextInGame = document.getElementById("statusTextInGame");
-const statusTextFooter = document.getElementById("statusTextFooter");
-const gameRoot = document.getElementById("gameRoot");
-const flagsEl = document.getElementById("flags");
-const setupFields = document.getElementById("setupFields");
+  // ===============================
+  // 0) DOM refs / UI wiring
+  // ===============================
+  const setupOverlay = document.getElementById("setupOverlay");
+  const gameScreen = document.getElementById("gameScreen");
+  const startGameBtn = document.getElementById("startGameBtn");
+  const liveIdInput = document.getElementById("liveIdInput");
+  const statusText = document.getElementById("statusText");
+  const statusTextInGame = document.getElementById("statusTextInGame");
+  const statusTextFooter = document.getElementById("statusTextFooter");
+  const flagsEl = document.getElementById("flags");
+  const setupFields = document.getElementById("setupFields");
 
-/* ---------------- State ---------------- */
-let client = null;
-let pendingStart = false;
-
-const state = {
-  spec: SPEC || {},
-  settings: {},
-  connected: false,
-
-  counters: { likes: 0, gifts: 0, chats: 0, joins: 0, shares: 0 },
-  _lastLikeFlagAt: 0,
-
-  // engine
-  canvas: null,
-  ctx2d: null,
-  w: 0,
-  h: 0,
-  dpr: 1,
-  t0: performance.now(),
-  last: performance.now(),
-
-  // entities
-  stars: [],
-  particles: [],
-  floaters: [],
-  players: new Map(), // userId -> player
-  bots: [],
-  boss: null,
-
-  // gameplay meters
-  hype: 0,          // 0..1 filled by likes/shares (optionally)
-  hypeDecay: 0.015, // per second
-  hypePulse: 0,
-
-  // fx
-  shake: 0,
-  flash: 0
-};
-
-/* ============================================================
-   UI helpers
-   ============================================================ */
-function setStatus(text, ok) {
-  const msg = String(text || "");
-  if (statusText) statusText.textContent = msg;
-  if (statusTextInGame) statusTextInGame.textContent = msg;
-  if (statusTextFooter) statusTextFooter.textContent = msg;
-
-  if (statusText) statusText.style.color = ok ? "rgba(46,229,157,.95)" : "rgba(255,255,255,.82)";
-  if (statusTextInGame) statusTextInGame.style.color = ok ? "rgba(46,229,157,.95)" : "rgba(255,255,255,.92)";
-  if (statusTextFooter) statusTextFooter.style.color = ok ? "rgba(46,229,157,.95)" : "rgba(255,255,255,.92)";
-}
-
-function showOverlay() {
-  if (setupOverlay) setupOverlay.style.display = "flex";
-}
-function hideOverlay() {
-  if (setupOverlay) setupOverlay.style.display = "none";
-}
-
-function escapeHtml(s) {
-  return String(s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function flag({ who, msg, pfp, tint }) {
-  if (!flagsEl) return;
-
-  const el = document.createElement("div");
-  el.className = "flag " + (tint || "tint-aqua");
-
-  const img = document.createElement("img");
-  img.className = "pfp";
-  img.alt = "";
-  img.loading = "lazy";
-  img.decoding = "async";
-  img.referrerPolicy = "no-referrer";
-  img.src =
-    pfp ||
-    "data:image/svg+xml;charset=utf-8," +
-      encodeURIComponent(
-        `<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72">
-           <rect width="72" height="72" rx="14" fill="rgba(255,255,255,.10)"/>
-           <text x="50%" y="55%" text-anchor="middle" font-family="system-ui,Segoe UI,Roboto,Arial" font-size="28" fill="rgba(255,255,255,.75)">${escapeHtml(
-             initials(who)
-           )}</text>
-         </svg>`
-      );
-
-  const txt = document.createElement("div");
-  txt.className = "txt";
-  txt.innerHTML = `<div class="line1">${escapeHtml(who || "viewer")}</div>
-                   <div class="line2">${escapeHtml(msg || "")}</div>`;
-
-  el.appendChild(img);
-  el.appendChild(txt);
-
-  flagsEl.insertBefore(el, flagsEl.firstChild);
-
-  // cap list
-  const max = 8;
-  while (flagsEl.childElementCount > max) flagsEl.removeChild(flagsEl.lastChild);
-}
-
-/* Tiny “copyright-free” audio via WebAudio (no external assets) */
-let audioCtx = null;
-function beep(type) {
-  try {
-    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    const t = audioCtx.currentTime;
-
-    const o = audioCtx.createOscillator();
-    const g = audioCtx.createGain();
-
-    o.type = "sine";
-    g.gain.setValueAtTime(0.0001, t);
-
-    if (type === "join") {
-      o.frequency.setValueAtTime(330, t);
-      g.gain.exponentialRampToValueAtTime(0.16, t + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.18);
-    } else if (type === "gift") {
-      o.frequency.setValueAtTime(220, t);
-      o.frequency.exponentialRampToValueAtTime(660, t + 0.10);
-      g.gain.exponentialRampToValueAtTime(0.20, t + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
-    } else if (type === "hit") {
-      o.frequency.setValueAtTime(520, t);
-      o.frequency.exponentialRampToValueAtTime(240, t + 0.08);
-      g.gain.exponentialRampToValueAtTime(0.18, t + 0.008);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.12);
-    } else {
-      o.frequency.setValueAtTime(440, t);
-      g.gain.exponentialRampToValueAtTime(0.12, t + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
-    }
-
-    o.connect(g);
-    g.connect(audioCtx.destination);
-
-    o.start(t);
-    o.stop(t + 0.30);
-  } catch (e) {
-    // ignore audio failures
-  }
-}
-
-function initials(name) {
-  const s = String(name || "").trim();
-  if (!s) return "?";
-  const parts = s.replace(/[^a-zA-Z0-9\s]/g, " ").trim().split(/\s+/).filter(Boolean);
-  const a = parts[0] ? parts[0][0] : "?";
-  const b = parts[1] ? parts[1][0] : "";
-  return (a + b).toUpperCase();
-}
-
-/* ============================================================
-   Settings Field Builder (Dynamic)
-   - If a command exists, it MUST be configurable.
-   - Optional: allow SHARE to trigger the same action as chat.
-   - Also supports “some viewers can’t chat” workaround.
-   ============================================================ */
-function ensureSettingField(def) {
-  if (!setupFields || !def || !def.id) return;
-  const exists = document.querySelector(`[data-setting="${CSS.escape(def.id)}"]`);
-  if (exists) return;
-
-  const wrap = document.createElement("label");
-  wrap.className = "field" + (def.span ? " field-span" : "");
-
-  const lab = document.createElement("span");
-  lab.className = "field-label";
-  lab.textContent = def.label || def.id;
-
-  wrap.appendChild(lab);
-
-  let input;
-  if (def.type === "select") {
-    input = document.createElement("select");
-    input.style.width = "100%";
-    input.style.borderRadius = "14px";
-    input.style.border = "1px solid rgba(255,255,255,.12)";
-    input.style.background = "rgba(0,0,0,.26)";
-    input.style.color = "rgba(247,247,251,.92)";
-    input.style.padding = "12px 12px";
-    input.style.outline = "none";
-    input.style.fontFamily = "var(--mono)";
-    (def.options || []).forEach((o) => {
-      const opt = document.createElement("option");
-      opt.value = o.value;
-      opt.textContent = o.label;
-      input.appendChild(opt);
-    });
-    if (def.value != null) input.value = String(def.value);
-  } else if (def.type === "checkbox") {
-    input = document.createElement("input");
-    input.type = "checkbox";
-    input.checked = !!def.value;
-    input.style.transform = "scale(1.15)";
-    input.style.marginTop = "4px";
-  } else if (def.type === "number") {
-    input = document.createElement("input");
-    input.type = "number";
-    input.value = def.value != null ? String(def.value) : "";
-    if (def.min != null) input.min = String(def.min);
-    if (def.max != null) input.max = String(def.max);
-    if (def.step != null) input.step = String(def.step);
-    input.placeholder = def.placeholder || "";
-    input.autocomplete = "off";
-  } else {
-    input = document.createElement("input");
-    input.type = "text";
-    input.value = def.value != null ? String(def.value) : "";
-    input.placeholder = def.placeholder || "";
-    input.autocomplete = "off";
-    input.autocapitalize = "none";
-    input.spellcheck = false;
+  function setStatus(msg) {
+    if (statusText) statusText.textContent = msg || "";
+    if (statusTextInGame) statusTextInGame.textContent = msg || "";
+    if (statusTextFooter) statusTextFooter.textContent = msg || "";
   }
 
-  input.setAttribute("data-setting", def.id);
-  wrap.appendChild(input);
-
-  // Put below LIVE ID field, but before any huge custom blocks
-  // We append at end; index.template.html places LIVE ID first and allows injected fields after.
-  setupFields.appendChild(wrap);
-}
-
-function ensureCoreSettingsUI() {
-  // Commands (always configurable)
-  ensureSettingField({
-    id: "joinCommand",
-    type: "text",
-    span: false,
-    label: "Chat Command: Join",
-    value: (state.spec?.defaults?.joinCommand) || "join",
-    placeholder: "join"
-  });
-
-  ensureSettingField({
-    id: "actionCommand",
-    type: "text",
-    span: false,
-    label: "Chat Command: Action",
-    value: (state.spec?.defaults?.actionCommand) || "attack",
-    placeholder: "attack"
-  });
-
-  // Share fallback selector (only used if the game uses chat commands)
-  ensureSettingField({
-    id: "shareAsAction",
-    type: "checkbox",
-    span: false,
-    label: "Allow SHARE to trigger the Action command (for viewers who can’t chat)",
-    value: true
-  });
-
-  ensureSettingField({
-    id: "shareCountsAs",
-    type: "select",
-    span: false,
-    label: "If SHARE triggers something, what should it count as?",
-    value: "action",
-    options: [
-      { value: "none", label: "Do nothing" },
-      { value: "action", label: "Same as Action command" },
-      { value: "join", label: "Same as Join command" },
-      { value: "hype", label: "Fill Hype meter" }
-    ]
-  });
-
-  // Optional: host scaling (keeps template flexible for many game types)
-  ensureSettingField({
-    id: "difficulty",
-    type: "select",
-    span: false,
-    label: "Difficulty",
-    value: "normal",
-    options: [
-      { value: "easy", label: "Easy" },
-      { value: "normal", label: "Normal" },
-      { value: "hard", label: "Hard" }
-    ]
-  });
-
-  ensureSettingField({
-    id: "roundSeconds",
-    type: "number",
-    span: false,
-    label: "Round Seconds",
-    value: Number(state.spec?.defaultSettings?.roundSeconds || 120),
-    min: 30, max: 9999, step: 5
-  });
-
-  ensureSettingField({
-    id: "winGoal",
-    type: "number",
-    span: false,
-    label: "Win Goal",
-    value: Number(state.spec?.defaultSettings?.winGoal || 25),
-    min: 1, max: 9999, step: 1
-  });
-}
-
-function readSettings() {
-  const out = {};
-  document.querySelectorAll("[data-setting]").forEach((el) => {
-    const id = el.getAttribute("data-setting");
-    if (!id) return;
-    if (el.type === "checkbox") out[id] = !!el.checked;
-    else out[id] = String(el.value || "").trim();
-  });
-
-  // Normalize helpful defaults
-  out.joinCommand = normalizeCommand(out.joinCommand || "join");
-  out.actionCommand = normalizeCommand(out.actionCommand || "attack");
-
-  out.roundSeconds = clampNum(out.roundSeconds, 30, 9999, 120);
-  out.winGoal = clampNum(out.winGoal, 1, 9999, 25);
-
-  state.settings = out;
-  return out;
-}
-
-function normalizeCommand(s) {
-  const t = String(s || "").trim().toLowerCase();
-  // allow "share" style text etc.
-  return t.replace(/^@/, "").replace(/\s+/g, " ").trim();
-}
-
-function clampNum(v, min, max, fallback) {
-  const n = Number(v);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(min, Math.min(max, n));
-}
-
-/* ============================================================
-   Engine: Canvas arena with boss + players + particles
-   ============================================================ */
-function mountCanvas() {
-  if (!gameRoot) return;
-
-  // Only mount once
-  if (state.canvas && state.ctx2d) return;
-
-  const c = document.createElement("canvas");
-  c.style.width = "100%";
-  c.style.height = "100%";
-  c.style.display = "block";
-  c.style.touchAction = "none";
-  gameRoot.appendChild(c);
-
-  state.canvas = c;
-  state.ctx2d = c.getContext("2d", { alpha: true });
-
-  resize();
-  window.addEventListener("resize", resize, { passive: true });
-
-  seedStars();
-  spawnBoss();
-  seedBots(7);
-
-  requestAnimationFrame(loop);
-}
-
-function resize() {
-  if (!state.canvas) return;
-  const rect = state.canvas.getBoundingClientRect();
-  state.dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-  state.w = Math.max(10, Math.floor(rect.width));
-  state.h = Math.max(10, Math.floor(rect.height));
-  state.canvas.width = Math.floor(state.w * state.dpr);
-  state.canvas.height = Math.floor(state.h * state.dpr);
-}
-
-function seedStars() {
-  state.stars.length = 0;
-  const count = Math.floor(90 + (state.w * state.h) / 18000);
-  for (let i = 0; i < count; i++) {
-    state.stars.push({
-      x: Math.random(),
-      y: Math.random(),
-      z: 0.3 + Math.random() * 0.7,
-      tw: Math.random()
-    });
-  }
-}
-
-function spawnBoss() {
-  const hpBase = 140;
-  state.boss = {
-    x: 0.5,
-    y: 0.32,
-    r: 46,
-    hp: hpBase,
-    hpMax: hpBase,
-    phase: 0,
-    pulse: 0
-  };
-}
-
-function seedBots(n) {
-  state.bots.length = 0;
-  for (let i = 0; i < n; i++) {
-    state.bots.push(makePlayer({
-      userId: "BOT_" + i,
-      nickname: ["Spark","Nova","Rift","Pulse","Hex","Orbit","Vibe"][i % 7],
-      uniqueId: "bot" + i,
-      avatar: ""
-    }, true));
-  }
-}
-
-function makePlayer(user, isBot) {
-  const h = hash01(user.userId || user.uniqueId || user.nickname || "x");
-  const x = 0.15 + Math.random() * 0.70;
-  const y = 0.48 + Math.random() * 0.42;
-  const col = palette(h);
-  return {
-    id: String(user.userId || user.uniqueId || user.nickname || "anon"),
-    name: String(user.nickname || user.uniqueId || "viewer"),
-    pfp: String(user.avatar || ""),
-    isBot: !!isBot,
-    x, y,
-    vx: (Math.random() - 0.5) * 0.18,
-    vy: (Math.random() - 0.5) * 0.18,
-    r: isBot ? 12 : 13,
-    col,
-    score: 0,
-    lastShotAt: 0
-  };
-}
-
-function palette(t) {
-  // two theme-ish colors blended
-  const a = lerpColor([255,0,80], [0,242,234], t);
-  return `rgb(${a[0]|0},${a[1]|0},${a[2]|0})`;
-}
-
-function hash01(s) {
-  let h = 2166136261;
-  const str = String(s || "");
-  for (let i=0;i<str.length;i++){
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return ((h >>> 0) % 10000) / 10000;
-}
-
-function lerp(a,b,t){ return a + (b-a)*t; }
-function lerpColor(a,b,t){
-  return [lerp(a[0],b[0],t), lerp(a[1],b[1],t), lerp(a[2],b[2],t)];
-}
-
-function spawnParticles(x, y, count, power, color) {
-  for (let i=0;i<count;i++){
-    state.particles.push({
-      x, y,
-      vx: (Math.random()-0.5) * power,
-      vy: (Math.random()-0.5) * power,
-      life: 0.55 + Math.random()*0.55,
-      age: 0,
-      col: color || "rgba(255,255,255,.9)"
-    });
-  }
-}
-
-function floater(text, x, y, color) {
-  state.floaters.push({
-    text: String(text || ""),
-    x, y,
-    vy: -0.08 - Math.random()*0.06,
-    life: 1.2,
-    age: 0,
-    col: color || "rgba(255,255,255,.90)"
-  });
-}
-
-function worldToPxX(x){ return x * state.w; }
-function worldToPxY(y){ return y * state.h; }
-
-function screenShake(strength) {
-  state.shake = Math.min(1, state.shake + strength);
-}
-function screenFlash(strength) {
-  state.flash = Math.min(1, state.flash + strength);
-}
-
-/* ============================================================
-   Gameplay actions
-   ============================================================ */
-function ensurePlayer(user) {
-  const id = String(user.userId || user.uniqueId || user.nickname || "");
-  if (!id) return null;
-  let p = state.players.get(id);
-  if (!p) {
-    p = makePlayer(user, false);
-    state.players.set(id, p);
-    state.counters.joins++;
-    beep("join");
-    flag({ who: p.name, msg: `joined`, pfp: p.pfp, tint: "tint-good" });
-    floater("JOIN!", p.x, p.y, "rgba(46,229,157,.95)");
-    spawnParticles(p.x, p.y, 20, 0.42, "rgba(46,229,157,.85)");
-  }
-  return p;
-}
-
-function joinAction(user) {
-  // Join (or keep alive)
-  const p = ensurePlayer(user);
-  if (!p) return;
-  // tiny bump for joining
-  p.vx += (Math.random()-0.5)*0.10;
-  p.vy += (Math.random()-0.5)*0.10;
-}
-
-function actionAttack(user, strength) {
-  const p = ensurePlayer(user);
-  if (!p || !state.boss) return;
-
-  const now = performance.now();
-  if (now - p.lastShotAt < 180) return; // basic anti-spam per user
-  p.lastShotAt = now;
-
-  const dmg = Math.max(1, Math.floor(strength || 1));
-  state.boss.hp = Math.max(0, state.boss.hp - dmg);
-  p.score += dmg;
-
-  // FX
-  screenShake(0.20);
-  screenFlash(0.10);
-  beep("hit");
-
-  // particles around boss
-  spawnParticles(state.boss.x, state.boss.y, 18, 0.55, p.col);
-  floater("-" + dmg, state.boss.x, state.boss.y, p.col);
-
-  if (state.boss.hp <= 0) {
-    // Boss down => big celebration + respawn stronger
-    screenShake(0.85);
-    screenFlash(0.75);
-    beep("gift");
-
-    spawnParticles(state.boss.x, state.boss.y, 140, 1.2, "rgba(255,255,255,.95)");
-    floater("BOSS DOWN!", 0.5, 0.22, "rgba(255,255,255,.95)");
-    flag({ who: "SYSTEM", msg: `Boss defeated!`, pfp: "", tint: "tint-pink" });
-
-    // respawn with scaling
-    const nextMax = Math.min(9999, Math.floor((state.boss.hpMax || 140) * 1.22 + 20));
-    state.boss.hpMax = nextMax;
-    state.boss.hp = nextMax;
-    state.boss.phase = (state.boss.phase || 0) + 1;
-  }
-}
-
-function addHype(amount) {
-  state.hype = Math.max(0, Math.min(1, state.hype + amount));
-}
-
-function likeBoost(count) {
-  const inc = Math.max(1, Number(count || 1));
-  state.counters.likes += inc;
-  addHype(Math.min(0.35, inc * 0.015));
-  state.hypePulse = 1;
-}
-
-function giftPower(name, repeat) {
-  const r = Math.max(1, Number(repeat || 1));
-  state.counters.gifts += r;
-
-  // tiered gift impact
-  const tier = r >= 10 ? "L" : r >= 5 ? "M" : "S";
-  const msg = `sent ${name || "gift"} ×${r}`;
-  flag({ who: "GIFT", msg, pfp: "", tint: "tint-pink" });
-  beep("gift");
-  addHype(tier === "L" ? 0.55 : tier === "M" ? 0.32 : 0.18);
-
-  // big effect: burst damage to boss
-  if (state.boss) {
-    const dmg = tier === "L" ? 30 : tier === "M" ? 16 : 8;
-    state.boss.hp = Math.max(0, state.boss.hp - dmg);
-    screenShake(tier === "L" ? 0.75 : 0.45);
-    screenFlash(tier === "L" ? 0.65 : 0.40);
-    spawnParticles(state.boss.x, state.boss.y, tier === "L" ? 120 : tier === "M" ? 70 : 40, tier === "L" ? 1.3 : 0.9, "rgba(255,255,255,.95)");
-    floater("GIFT HIT!", state.boss.x, state.boss.y, "rgba(255,255,255,.92)");
-    if (state.boss.hp <= 0) {
-      // Let normal attack logic handle respawn next frame
-    }
-  }
-}
-
-/* ============================================================
-   Render loop
-   ============================================================ */
-function loop(now) {
-  const dt = Math.min(0.033, Math.max(0.001, (now - state.last) / 1000));
-  state.last = now;
-
-  step(dt);
-  draw(dt);
-
-  requestAnimationFrame(loop);
-}
-
-function step(dt) {
-  // decay meters
-  state.hype = Math.max(0, state.hype - state.hypeDecay * dt);
-  state.hypePulse = Math.max(0, state.hypePulse - 2.6 * dt);
-  state.shake = Math.max(0, state.shake - 2.5 * dt);
-  state.flash = Math.max(0, state.flash - 2.2 * dt);
-
-  // boss pulse
-  if (state.boss) {
-    state.boss.pulse = (state.boss.pulse || 0) + dt * (1.8 + state.hype * 2.8);
+  function showOverlay(show) {
+    if (!setupOverlay) return;
+    setupOverlay.style.display = show ? "flex" : "none";
   }
 
-  // bots move and occasionally shoot
-  for (const b of state.bots) {
-    wander(b, dt);
-    if (Math.random() < (0.30 + state.hype * 0.55) * dt) {
-      actionAttack({ userId: b.id, nickname: b.name, uniqueId: b.id, avatar: "" }, 1);
-    }
+  // ===============================
+  // 1) Helpers: safe parsing & UI
+  // ===============================
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+  function safeStr(v) {
+    if (v === null || v === undefined) return "";
+    return String(v);
   }
 
-  // players
-  for (const p of state.players.values()) {
-    wander(p, dt);
+  function normText(s) {
+    return safeStr(s).trim();
   }
 
-  // particles
-  for (let i = state.particles.length - 1; i >= 0; i--) {
-    const pt = state.particles[i];
-    pt.age += dt;
-    pt.x += pt.vx * dt;
-    pt.y += pt.vy * dt;
-    pt.vx *= Math.pow(0.22, dt);
-    pt.vy *= Math.pow(0.22, dt);
-    if (pt.age >= pt.life) state.particles.splice(i, 1);
+  function normLower(s) {
+    return normText(s).toLowerCase();
   }
 
-  // floaters
-  for (let i = state.floaters.length - 1; i >= 0; i--) {
-    const f = state.floaters[i];
-    f.age += dt;
-    f.y += f.vy * dt;
-    if (f.age >= f.life) state.floaters.splice(i, 1);
+  function escapeHtml(s) {
+    return safeStr(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#039;");
   }
 
-  // Hype triggers occasional meteor shower effect
-  if (state.hype > 0.82 && Math.random() < 0.65 * dt) {
-    spawnParticles(Math.random(), 0.04, 12, 0.75, "rgba(0,242,234,.95)");
-    screenShake(0.08);
-  }
-}
-
-function wander(p, dt) {
-  // wobble
-  const sp = 0.24 + state.hype * 0.38;
-  p.vx += (Math.random() - 0.5) * sp * dt;
-  p.vy += (Math.random() - 0.5) * sp * dt;
-
-  // clamp velocity
-  p.vx = Math.max(-0.28, Math.min(0.28, p.vx));
-  p.vy = Math.max(-0.28, Math.min(0.28, p.vy));
-
-  p.x += p.vx * dt;
-  p.y += p.vy * dt;
-
-  // bounds
-  const pad = 0.06;
-  if (p.x < pad) { p.x = pad; p.vx *= -0.85; }
-  if (p.x > 1 - pad) { p.x = 1 - pad; p.vx *= -0.85; }
-  if (p.y < 0.18) { p.y = 0.18; p.vy *= -0.85; }
-  if (p.y > 0.96) { p.y = 0.96; p.vy *= -0.85; }
-}
-
-function draw(dt) {
-  const g = state.ctx2d;
-  const c = state.canvas;
-  if (!g || !c) return;
-
-  g.save();
-  g.scale(state.dpr, state.dpr);
-
-  // shake
-  const sh = state.shake;
-  if (sh > 0.001) {
-    g.translate((Math.random() - 0.5) * 10 * sh, (Math.random() - 0.5) * 10 * sh);
-  }
-
-  // background
-  g.clearRect(0, 0, state.w, state.h);
-  drawStars(g);
-  drawGlow(g);
-
-  // boss
-  drawBoss(g);
-
-  // players + bots
-  for (const b of state.bots) drawPlayer(g, b, true);
-  for (const p of state.players.values()) drawPlayer(g, p, false);
-
-  // particles
-  for (const pt of state.particles) {
-    const t = pt.age / pt.life;
-    g.globalAlpha = (1 - t) * 0.9;
-    g.fillStyle = pt.col;
-    g.beginPath();
-    g.arc(worldToPxX(pt.x), worldToPxY(pt.y), 2.2 + (1 - t) * 2.0, 0, Math.PI * 2);
-    g.fill();
-  }
-  g.globalAlpha = 1;
-
-  // HUD
-  drawHUD(g);
-
-  // floaters
-  for (const f of state.floaters) {
-    const t = f.age / f.life;
-    g.globalAlpha = (1 - t) * 0.95;
-    g.fillStyle = f.col;
-    g.font = "900 18px system-ui,Segoe UI,Roboto,Arial";
-    g.textAlign = "center";
-    g.textBaseline = "middle";
-    g.fillText(f.text, worldToPxX(f.x), worldToPxY(f.y));
-  }
-  g.globalAlpha = 1;
-
-  // flash
-  if (state.flash > 0.001) {
-    g.globalAlpha = 0.18 * state.flash;
-    g.fillStyle = "#ffffff";
-    g.fillRect(0, 0, state.w, state.h);
-    g.globalAlpha = 1;
-  }
-
-  g.restore();
-}
-
-function drawStars(g) {
-  g.save();
-  g.globalAlpha = 0.85;
-  for (const s of state.stars) {
-    s.tw += 0.8 * (0.02 + Math.random() * 0.02);
-    const tw = 0.4 + 0.6 * Math.abs(Math.sin(s.tw));
-    const x = s.x * state.w;
-    const y = s.y * state.h;
-    g.globalAlpha = 0.10 + 0.35 * tw * s.z;
-    g.fillStyle = "rgba(255,255,255,.9)";
-    g.fillRect(x, y, 1.0 + s.z, 1.0 + s.z);
-  }
-  g.restore();
-}
-
-function drawGlow(g) {
-  // center haze
-  const grd = g.createRadialGradient(state.w * 0.5, state.h * 0.35, 10, state.w * 0.5, state.h * 0.35, state.w * 0.65);
-  grd.addColorStop(0, "rgba(255,0,80,.10)");
-  grd.addColorStop(0.55, "rgba(0,242,234,.06)");
-  grd.addColorStop(1, "rgba(0,0,0,0)");
-  g.fillStyle = grd;
-  g.fillRect(0, 0, state.w, state.h);
-}
-
-function drawBoss(g) {
-  const b = state.boss;
-  if (!b) return;
-
-  const x = worldToPxX(b.x);
-  const y = worldToPxY(b.y);
-
-  const pulse = 1 + 0.06 * Math.sin(b.pulse || 0);
-  const r = (b.r || 46) * pulse;
-
-  // outer ring
-  g.save();
-  g.globalAlpha = 0.35 + state.hype * 0.25;
-  g.strokeStyle = "rgba(255,255,255,.45)";
-  g.lineWidth = 2;
-  g.beginPath();
-  g.arc(x, y, r + 10 + 12 * state.hypePulse, 0, Math.PI * 2);
-  g.stroke();
-  g.restore();
-
-  // body
-  const grd = g.createRadialGradient(x - r*0.3, y - r*0.35, 8, x, y, r);
-  grd.addColorStop(0, "rgba(255,255,255,.95)");
-  grd.addColorStop(0.22, "rgba(255,0,80,.55)");
-  grd.addColorStop(0.62, "rgba(0,242,234,.35)");
-  grd.addColorStop(1, "rgba(0,0,0,.15)");
-  g.fillStyle = grd;
-  g.beginPath();
-  g.arc(x, y, r, 0, Math.PI * 2);
-  g.fill();
-
-  // eyes
-  g.fillStyle = "rgba(0,0,0,.55)";
-  g.beginPath();
-  g.arc(x - r*0.22, y - r*0.10, Math.max(2, r*0.08), 0, Math.PI * 2);
-  g.arc(x + r*0.22, y - r*0.10, Math.max(2, r*0.08), 0, Math.PI * 2);
-  g.fill();
-
-  // HP bar
-  const bw = Math.min(state.w * 0.78, 520);
-  const bh = 10;
-  const bx = state.w * 0.5 - bw * 0.5;
-  const by = state.h * 0.08;
-
-  const pct = b.hpMax ? (b.hp / b.hpMax) : 1;
-
-  g.save();
-  g.globalAlpha = 0.9;
-  roundRect(g, bx, by, bw, bh, 999);
-  g.fillStyle = "rgba(0,0,0,.32)";
-  g.fill();
-  roundRect(g, bx, by, bw * pct, bh, 999);
-  g.fillStyle = pct > 0.35 ? "rgba(46,229,157,.92)" : "rgba(255,77,77,.92)";
-  g.fill();
-  g.restore();
-}
-
-function drawPlayer(g, p, isBot) {
-  const x = worldToPxX(p.x);
-  const y = worldToPxY(p.y);
-  const r = (p.r || 12);
-
-  // glow
-  g.save();
-  g.globalAlpha = 0.18;
-  g.fillStyle = p.col;
-  g.beginPath();
-  g.arc(x, y, r * 2.6, 0, Math.PI * 2);
-  g.fill();
-  g.restore();
-
-  // body
-  g.fillStyle = p.col;
-  g.beginPath();
-  g.arc(x, y, r * 1.18, 0, Math.PI * 2);
-  g.fill();
-
-  // outline
-  g.strokeStyle = "rgba(255,255,255,.35)";
-  g.lineWidth = 1;
-  g.beginPath();
-  g.arc(x, y, r * 1.18, 0, Math.PI * 2);
-  g.stroke();
-
-  // name plate (only for real players, keep HUD clean)
-  if (!isBot) {
-    g.save();
-    g.globalAlpha = 0.9;
-    g.font = "900 12px system-ui,Segoe UI,Roboto,Arial";
-    g.textAlign = "center";
-    g.textBaseline = "top";
-    g.fillStyle = "rgba(255,255,255,.90)";
-    g.fillText(p.name, x, y + r * 1.6);
-    g.restore();
-  }
-}
-
-function drawHUD(g) {
-  // Hype meter (likes/shares)
-  const w = Math.min(state.w * 0.72, 420);
-  const h = 14;
-  const x = state.w * 0.5 - w * 0.5;
-  const y = state.h - 28;
-
-  const pct = Math.max(0, Math.min(1, state.hype));
-
-  g.save();
-  g.globalAlpha = 0.92;
-  roundRect(g, x, y, w, h, 999);
-  g.fillStyle = "rgba(0,0,0,.32)";
-  g.fill();
-
-  roundRect(g, x, y, w * pct, h, 999);
-  g.fillStyle = "rgba(0,242,234,.92)";
-  g.fill();
-
-  // label
-  g.font = "900 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace";
-  g.fillStyle = "rgba(247,247,251,.88)";
-  g.textAlign = "center";
-  g.textBaseline = "bottom";
-  g.fillText("HYPE", state.w * 0.5, y - 4);
-
-  // counters corner
-  g.textAlign = "left";
-  g.textBaseline = "top";
-  g.font = "900 12px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace";
-  g.fillStyle = "rgba(247,247,251,.78)";
-  g.fillText(
-    `chat ${state.counters.chats}  likes ${state.counters.likes}  gifts ${state.counters.gifts}`,
-    14,
-    12
-  );
-
-  g.restore();
-}
-
-function roundRect(g, x, y, w, h, r) {
-  const rr = Math.min(r, h / 2, w / 2);
-  g.beginPath();
-  g.moveTo(x + rr, y);
-  g.arcTo(x + w, y, x + w, y + h, rr);
-  g.arcTo(x + w, y + h, x, y + h, rr);
-  g.arcTo(x, y + h, x, y, rr);
-  g.arcTo(x, y, x + w, y, rr);
-  g.closePath();
-}
-
-/* ============================================================
-   ✅ WORKING TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
-   (Structure preserved; adapted to generic gameplay)
-   ============================================================ */
-
-// 7. TikTok message handling
-// ===============================
-
-function handleTeamJoin(text, user) {
-  // For general games, use this as "join" command detection
-  const maybeJoin = normalizeJoinText(text);
-  if (!maybeJoin) return;
-
-  // Join the game
-  joinAction(user);
-  console.log(`${user.nickname} joined game`);
-}
-
-function handleAnswer(text, user) {
-  // For general games, use this as "action" command detection
-  const maybeAction = normalizeActionText(text);
-  if (!maybeAction) return;
-
-  // Perform action (attack boss)
-  actionAttack(user, 2);
-}
-
-// Chat event
-function onChatMessage(data) {
-  try {
-    const msg = data || {};
-    const text = getChatTextFromMessage(msg);
-    const user = getUserFromMessage(msg);
-    if (!text) return;
-
-    state.counters.chats++;
-    flag({ who: user.nickname || user.uniqueId || "viewer", msg: text, pfp: user.avatar, tint: "tint-aqua" });
-
-    // 1) Join selection (join command; any case)
-    handleTeamJoin(text, user);
-
-    // 2) Action selection (action command; any case)
-    handleAnswer(text, user);
-
-    // 3) Game-specific extra chat routing (AI region)
-    try { if (typeof aiOnChat === "function") aiOnChat(state, { text, user }); } catch(e){}
-  } catch (e) {
-    console.error("Error in chat handler:", e);
-  }
-}
-
-function onGiftMessage(data) {
-  try {
-    const g = normalizeGift(data);
-    giftPower(g.giftName, g.repeat);
-    try { if (typeof aiOnGift === "function") aiOnGift(state, g); } catch(e){}
-  } catch (e) {
-    console.error("Error in gift handler:", e);
-  }
-}
-
-// ===============================
-// 8. TikTok client setup / connect
-// ===============================
-
-function setupTikTokClient(liveId) {
-  if (!liveId) {
-    throw new Error("liveId is required");
-  }
-
-  if (client && client.socket) {
+  // Small WebAudio blip (copyright-safe)
+  let audioCtx = null;
+  function beep(freq = 880, ms = 80, gain = 0.03) {
     try {
-      client.socket.close();
-    } catch (e) {
-      console.warn("Error closing previous socket:", e);
-    }
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const t0 = audioCtx.currentTime;
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = "triangle";
+      osc.frequency.setValueAtTime(freq, t0);
+      g.gain.setValueAtTime(gain, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + ms / 1000);
+      osc.connect(g);
+      g.connect(audioCtx.destination);
+      osc.start(t0);
+      osc.stop(t0 + ms / 1000);
+    } catch { /* ignore */ }
   }
 
-  if (typeof TikTokClient === "undefined") {
-    throw new Error("TikTokClient is not available. Check tiktok-client.js.");
-  }
-
-  client = new TikTokClient(liveId);
-
-  // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
-  if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
-    client.setAccessToken(CHATTOK_CREATOR_TOKEN);
-  }
-
-  client.on("connected", () => {
-    console.log("Connected to TikTok hub.");
-    state.connected = true;
-    setStatus("Connected", true);
-
-    flag({ who: "SYSTEM", msg: "Connected to TikTok LIVE", pfp: "", tint: "tint-good" });
-
-    // Only start game once we know we're connected
-    if (pendingStart) {
-      pendingStart = false;
-      hideOverlay();
-    }
-  });
-
-  client.on("disconnected", (reason) => {
-    console.log("Disconnected from TikTok hub:", reason);
-    state.connected = false;
-
-    const msg = reason || "Connection closed";
-    setStatus("Disconnected: " + msg, false);
-
-    flag({ who: "SYSTEM", msg: "Disconnected: " + msg, pfp: "", tint: "tint-warn" });
-
-    if (!pendingStart) {
-      // keep overlay open so host can retry
-      showOverlay();
-    } else {
-      pendingStart = false;
-      showOverlay();
-    }
-  });
-
-  client.on("error", (err) => {
-    console.error("TikTok client error:", err);
-    state.connected = false;
-    pendingStart = false;
-    const m = err && err.message ? err.message : "Unknown";
-    setStatus("Error: " + m, false);
-    flag({ who: "SYSTEM", msg: "Error: " + m, pfp: "", tint: "tint-warn" });
-    showOverlay();
-  });
-
-  client.on("chat", onChatMessage);
-  client.on("gift", onGiftMessage);
-
-  client.on("like", (data) => {
+  // Notifications: use flags if present, otherwise fallback to console/status
+  function notify(type, user, message, opts = {}) {
     try {
-      const l = normalizeLike(data);
-      likeBoost(l.count);
+      const mode = getSetting("notifMode", "auto"); // auto | flags | toast | off
+      if (mode === "off") return;
 
-      // throttle flags
-      const now = Date.now();
-      if (!state._lastLikeFlagAt) state._lastLikeFlagAt = 0;
-      if (now - state._lastLikeFlagAt > 1200) {
-        state._lastLikeFlagAt = now;
-        const u = getUserFromMessage(data);
-        flag({ who: u.nickname || u.uniqueId || "viewer", msg: `liked ×${l.count}`, pfp: u.avatar, tint: "tint-aqua" });
+      const u = user || {};
+      const name = normText(u.nickname || u.uniqueId || u.userId || "Viewer");
+      const pfp = normText(u.profilePictureUrl || u.avatar || u.pfp || "");
+
+      if (!flagsEl || (mode !== "auto" && mode !== "flags")) {
+        // Minimal fallback
+        // (We intentionally avoid noisy dev logs in production gameplay)
+        return;
       }
 
-      try { if (typeof aiOnLike === "function") aiOnLike(state, l); } catch(e){}
+      const flag = document.createElement("div");
+      flag.className = "flag";
+
+      const p = document.createElement(pfp ? "img" : "div");
+      p.className = "pfp";
+      if (pfp) {
+        p.src = pfp;
+        p.alt = name;
+        p.loading = "lazy";
+        p.referrerPolicy = "no-referrer";
+      }
+
+      const text = document.createElement("div");
+      text.className = "flagText";
+      const who = document.createElement("div");
+      who.className = "who";
+      who.textContent = name;
+      const msg = document.createElement("div");
+      msg.className = "msg";
+      msg.textContent = normText(message);
+
+      text.appendChild(who);
+      text.appendChild(msg);
+
+      flag.appendChild(p);
+      flag.appendChild(text);
+
+      // Optional color accents by type (subtle; not required)
+      if (type === "gift") {
+        flag.style.borderColor = "rgba(255,0,80,.28)";
+      } else if (type === "like") {
+        flag.style.borderColor = "rgba(0,242,234,.28)";
+      } else if (type === "join") {
+        flag.style.borderColor = "rgba(255,255,255,.18)";
+      }
+
+      flagsEl.prepend(flag);
+
+      // cap stack
+      const max = clamp(parseInt(getSetting("notifMax", "5"), 10) || 5, 1, 8);
+      while (flagsEl.children.length > max) flagsEl.removeChild(flagsEl.lastChild);
+
+      const life = clamp(parseInt(getSetting("notifLifeMs", "2400"), 10) || 2400, 900, 6000);
+      setTimeout(() => {
+        try { flag.remove(); } catch { /* ignore */ }
+      }, life);
+    } catch { /* ignore */ }
+  }
+
+  // ===============================
+  // 2) Host settings UI (inject if missing)
+  // ===============================
+  const injectedSettings = [
+    {
+      id: "joinCommand",
+      label: "Join command (chat)",
+      type: "text",
+      def: "join",
+      help: "Viewers type this to join the game.",
+    },
+    {
+      id: "actionCommand",
+      label: "Action command (chat)",
+      type: "text",
+      def: "pulse",
+      help: "Viewers type this to trigger the main action (attack/ability).",
+    },
+    {
+      id: "allowShareForJoin",
+      label: "Allow shares to count as JOIN",
+      type: "select",
+      def: "yes",
+      options: [
+        ["yes", "Yes (shares count as join)"],
+        ["no", "No (chat only)"],
+      ],
+      help: "Some viewers can’t be seen chatting; shares can also count as join.",
+    },
+    {
+      id: "allowShareForAction",
+      label: "Allow shares to count as ACTION",
+      type: "select",
+      def: "no",
+      options: [
+        ["no", "No"],
+        ["yes", "Yes (shares trigger action)"],
+      ],
+      help: "Optional: shares can trigger the same action as the chat command.",
+    },
+    {
+      id: "winGoal",
+      label: "Win goal (points)",
+      type: "number",
+      def: "25",
+      help: "First player to reach this score wins the round.",
+      min: 5,
+      max: 500,
+      step: 1,
+    },
+    {
+      id: "roundSeconds",
+      label: "Round time (seconds)",
+      type: "number",
+      def: "90",
+      help: "If time runs out, the top score wins the round.",
+      min: 20,
+      max: 600,
+      step: 5,
+    },
+    {
+      id: "demoMode",
+      label: "Demo mode (offline animation)",
+      type: "select",
+      def: "yes",
+      options: [
+        ["yes", "Yes (run demo bots if not connected)"],
+        ["no", "No (TikTok only)"],
+      ],
+      help: "Ensures the game is never a blank screen during testing.",
+    },
+    {
+      id: "notifMode",
+      label: "Notifications",
+      type: "select",
+      def: "auto",
+      options: [
+        ["auto", "Auto (use flags if available)"],
+        ["flags", "Flags (right pop-outs)"],
+        ["off", "Off"],
+      ],
+      help: "Only used if the game chooses to show notifications.",
+    },
+  ];
+
+  function makeFieldHTML(s) {
+    const id = escapeHtml(s.id);
+    const label = escapeHtml(s.label);
+    const help = escapeHtml(s.help || "");
+    const def = escapeHtml(s.def || "");
+
+    if (s.type === "select") {
+      const opts = (s.options || [])
+        .map(([v, t]) => `<option value="${escapeHtml(v)}"${v === s.def ? " selected" : ""}>${escapeHtml(t)}</option>`)
+        .join("");
+      return `
+        <label class="field field-span">
+          <span class="field-label">${label}</span>
+          <select id="${id}">
+            ${opts}
+          </select>
+          ${help ? `<span class="mini">${help}</span>` : ""}
+        </label>
+      `;
+    }
+
+    if (s.type === "number") {
+      const min = s.min !== undefined ? ` min="${s.min}"` : "";
+      const max = s.max !== undefined ? ` max="${s.max}"` : "";
+      const step = s.step !== undefined ? ` step="${s.step}"` : "";
+      return `
+        <label class="field field-span">
+          <span class="field-label">${label}</span>
+          <input id="${id}" type="number" value="${def}"${min}${max}${step} />
+          ${help ? `<span class="mini">${help}</span>` : ""}
+        </label>
+      `;
+    }
+
+    // text
+    return `
+      <label class="field field-span">
+        <span class="field-label">${label}</span>
+        <input id="${id}" type="text" value="${def}" />
+        ${help ? `<span class="mini">${help}</span>` : ""}
+      </label>
+    `;
+  }
+
+  function ensureSettingsUI() {
+    try {
+      if (!setupFields) return;
+      for (const s of injectedSettings) {
+        if (document.getElementById(s.id)) continue; // already injected by server
+        const wrap = document.createElement("div");
+        wrap.innerHTML = makeFieldHTML(s).trim();
+        // Insert after LIVE ID field (first field-span) so it stays near top
+        setupFields.appendChild(wrap.firstElementChild);
+      }
+    } catch { /* ignore */ }
+  }
+
+  function getSetting(id, fallback) {
+    const el = document.getElementById(id);
+    if (!el) return fallback;
+    const tag = (el.tagName || "").toLowerCase();
+    if (tag === "select") return safeStr(el.value || fallback);
+    if (tag === "input") return safeStr(el.value || fallback);
+    return fallback;
+  }
+
+  ensureSettingsUI();
+
+  // ===============================
+  // 3) Game: “Pulse Arena” — fun by default
+  // ===============================
+  const root = document.getElementById("gameRoot");
+
+  // canvas game layer
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", { alpha: true });
+
+  // HUD layer (simple DOM)
+  const hud = document.createElement("div");
+  hud.className = "card";
+  hud.innerHTML = `
+    <h3>Pulse Arena</h3>
+    <div class="bigText" id="hudHeadline">Get ready…</div>
+    <div class="meterGrid">
+      <div class="card" style="padding:10px;">
+        <h3 style="margin-bottom:6px;">Likes charge</h3>
+        <div class="meter"><div id="likeFill"></div></div>
+        <div class="mini" id="likeText" style="margin-top:6px;">0%</div>
+      </div>
+      <div class="card" style="padding:10px;">
+        <h3 style="margin-bottom:6px;">Top players</h3>
+        <div class="mini" id="scoreList" style="font-family:var(--mono);line-height:1.35;">—</div>
+      </div>
+    </div>
+    <div class="mini" id="hudHowTo" style="margin-top:10px;">
+      Type <b id="hudJoinCmd">join</b> to enter. Type <b id="hudActionCmd">pulse</b> to fire a pulse.
+    </div>
+  `;
+
+  const roundCard = document.createElement("div");
+  roundCard.className = "card";
+  roundCard.style.display = "none";
+  roundCard.innerHTML = `
+    <h3>Round Result</h3>
+    <div class="bigText" id="roundWinner">—</div>
+    <div class="mini" id="roundDetail">—</div>
+  `;
+
+  const stage = document.createElement("div");
+  stage.className = "card";
+  stage.style.padding = "0";
+  stage.style.overflow = "hidden";
+  stage.appendChild(canvas);
+
+  if (root) {
+    root.appendChild(hud);
+    root.appendChild(stage);
+    root.appendChild(roundCard);
+  }
+
+  const likeFill = document.getElementById("likeFill");
+  const likeText = document.getElementById("likeText");
+  const scoreList = document.getElementById("scoreList");
+  const hudJoinCmd = document.getElementById("hudJoinCmd");
+  const hudActionCmd = document.getElementById("hudActionCmd");
+  const hudHeadline = document.getElementById("hudHeadline");
+  const roundWinner = document.getElementById("roundWinner");
+  const roundDetail = document.getElementById("roundDetail");
+
+  function resize() {
+    try {
+      const rect = stage.getBoundingClientRect();
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      canvas.width = Math.floor(rect.width * dpr);
+      canvas.height = Math.floor(Math.min(rect.height, rect.width * 1.25) * dpr); // keep it tall-ish
+      canvas.style.width = rect.width + "px";
+      canvas.style.height = Math.min(rect.height, rect.width * 1.25) + "px";
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    } catch { /* ignore */ }
+  }
+  window.addEventListener("resize", resize, { passive: true });
+  setTimeout(resize, 50);
+
+  // Entities
+  const players = new Map(); // userId -> player
+  const pulses = [];
+  const bosses = [];
+  let likeCharge = 0; // 0..1
+  let lastTick = now();
+  let gameStarted = false;
+  let gameFinished = false;
+
+  // Round settings (from UI)
+  let roundMs = 90 * 1000;
+  let winGoal = 25;
+  let roundStartAt = 0;
+
+  function rand(a, b) { return a + Math.random() * (b - a); }
+  function hashColor(seedStr) {
+    // Deterministic-ish vibrant color per user
+    let h = 0;
+    for (let i = 0; i < seedStr.length; i++) h = (h * 31 + seedStr.charCodeAt(i)) >>> 0;
+    const r = 120 + (h % 136);
+    const g = 90 + ((h >> 8) % 156);
+    const b = 110 + ((h >> 16) % 136);
+    return `rgb(${r},${g},${b})`;
+  }
+
+  function getOrCreatePlayer(user) {
+    const u = user || {};
+    const userId = normText(u.userId || u.uniqueId || u.id || u.nickname || "");
+    if (!userId) return null;
+
+    if (players.has(userId)) return players.get(userId);
+
+    const name = normText(u.nickname || u.uniqueId || userId).slice(0, 18);
+    const p = {
+      userId,
+      name,
+      pfp: normText(u.profilePictureUrl || u.avatar || u.pfp || ""),
+      x: rand(40, 290),
+      y: rand(80, 320),
+      vx: rand(-30, 30),
+      vy: rand(-30, 30),
+      r: rand(10, 14),
+      score: 0,
+      lastActionAt: 0,
+      color: hashColor(userId),
+    };
+    players.set(userId, p);
+    notify("join", u, "joined the arena");
+    beep(740, 70, 0.03);
+    return p;
+  }
+
+  function formatScoreboard() {
+    const top = Array.from(players.values())
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+
+    if (!top.length) return "No players yet.";
+
+    return top
+      .map((p, i) => `${String(i + 1).padStart(2, "0")}. ${p.name}  —  ${p.score}`)
+      .join("\n");
+  }
+
+  function updateHud() {
+    try {
+      if (hudJoinCmd) hudJoinCmd.textContent = getSetting("joinCommand", "join");
+      if (hudActionCmd) hudActionCmd.textContent = getSetting("actionCommand", "pulse");
+
+      const pct = Math.round(likeCharge * 100);
+      if (likeFill) likeFill.style.width = pct + "%";
+      if (likeText) likeText.textContent = pct + "%";
+      if (scoreList) scoreList.textContent = formatScoreboard();
+
+      const elapsed = roundStartAt ? (now() - roundStartAt) : 0;
+      const remain = Math.max(0, roundMs - elapsed);
+      const s = Math.ceil(remain / 1000);
+      if (hudHeadline) {
+        if (!gameStarted) hudHeadline.textContent = "Enter LIVE ID + Start!";
+        else if (gameFinished) hudHeadline.textContent = "Round complete!";
+        else hudHeadline.textContent = `Round: ${s}s  •  Goal: ${winGoal}`;
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Main action: pulse blast that awards points on boss hits
+  function firePulse(p) {
+    const t = now();
+    if (!p) return;
+    if (t - p.lastActionAt < 650) return; // cooldown
+    p.lastActionAt = t;
+
+    const speed = 240 + likeCharge * 260;
+    const ang = rand(-Math.PI, Math.PI);
+    const power = 1 + Math.floor(likeCharge * 3);
+
+    pulses.push({
+      x: p.x,
+      y: p.y,
+      vx: Math.cos(ang) * speed,
+      vy: Math.sin(ang) * speed,
+      r: 6 + power * 1.5,
+      ownerId: p.userId,
+      life: 900 + power * 250,
+      born: t,
+      power,
+    });
+
+    notify("chat", { nickname: p.name, profilePictureUrl: p.pfp }, `used ${getSetting("actionCommand", "pulse")}`);
+    beep(980, 55, 0.028);
+    likeCharge = Math.max(0, likeCharge - 0.35); // spend charge
+  }
+
+  function spawnBoss(source = "auto") {
+    const t = now();
+    bosses.push({
+      x: rand(60, 290),
+      y: rand(110, 320),
+      vx: rand(-35, 35),
+      vy: rand(-35, 35),
+      r: rand(26, 34),
+      hp: 14,
+      born: t,
+      source,
+      wob: rand(0, Math.PI * 2),
+    });
+    notify("gift", { nickname: "SYSTEM" }, "Boss spawned!");
+    beep(220, 120, 0.035);
+  }
+
+  function endRound(winner) {
+    gameFinished = true;
+    roundCard.style.display = "block";
+    const name = winner ? winner.name : "No winner";
+    if (roundWinner) roundWinner.textContent = name;
+    if (roundDetail) {
+      const top = Array.from(players.values()).sort((a, b) => b.score - a.score)[0];
+      const topLine = top ? `${top.name} led with ${top.score} points.` : "No scores recorded.";
+      roundDetail.textContent = `Goal: ${winGoal} • Duration: ${Math.round(roundMs / 1000)}s • ${topLine}`;
+    }
+    beep(540, 160, 0.03);
+    setTimeout(() => {
+      // reset round
+      roundCard.style.display = "none";
+      for (const p of players.values()) p.score = 0;
+      pulses.length = 0;
+      bosses.length = 0;
+      likeCharge = 0;
+      gameFinished = false;
+      roundStartAt = now();
+    }, 5200);
+  }
+
+  function beginGameLoop() {
+    if (gameStarted) return;
+    gameStarted = true;
+    gameFinished = false;
+
+    // Read settings
+    winGoal = clamp(parseInt(getSetting("winGoal", "25"), 10) || 25, 5, 500);
+    roundMs = clamp(parseInt(getSetting("roundSeconds", "90"), 10) || 90, 20, 600) * 1000;
+
+    roundStartAt = now();
+    setStatus("Connected.");
+    showOverlay(false);
+
+    // Ensure at least one boss so gameplay is obvious
+    spawnBoss("start");
+
+    lastTick = now();
+    tick();
+  }
+
+  // Rendering
+  function draw(dt) {
+    const w = canvas.width / Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const h = canvas.height / Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+    // Backdrop
+    ctx.clearRect(0, 0, w, h);
+
+    // subtle grid glow
+    ctx.save();
+    ctx.globalAlpha = 0.12;
+    for (let y = 0; y < h; y += 28) {
+      ctx.fillStyle = "rgba(255,255,255,0.08)";
+      ctx.fillRect(0, y, w, 1);
+    }
+    for (let x = 0; x < w; x += 28) {
+      ctx.fillStyle = "rgba(255,255,255,0.06)";
+      ctx.fillRect(x, 0, 1, h);
+    }
+    ctx.restore();
+
+    // Bosses
+    for (const b of bosses) {
+      b.wob += dt * 0.003;
+      ctx.save();
+      ctx.translate(b.x, b.y);
+
+      const glow = 0.22 + 0.10 * Math.sin(b.wob);
+      ctx.shadowColor = "rgba(255,0,80,0.55)";
+      ctx.shadowBlur = 18;
+
+      ctx.globalAlpha = 1;
+      ctx.beginPath();
+      ctx.fillStyle = "rgba(255,0,80,0.20)";
+      ctx.arc(0, 0, b.r + 10, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.shadowColor = "rgba(0,242,234,0.45)";
+      ctx.shadowBlur = 14;
+
+      ctx.beginPath();
+      ctx.fillStyle = `rgba(0,242,234,${0.20 + glow})`;
+      ctx.arc(0, 0, b.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // HP ring
+      const hpPct = clamp(b.hp / 14, 0, 1);
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      ctx.arc(0, 0, b.r + 8, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = "rgba(255,255,255,0.85)";
+      ctx.beginPath();
+      ctx.arc(0, 0, b.r + 8, -Math.PI / 2, -Math.PI / 2 + hpPct * Math.PI * 2);
+      ctx.stroke();
+
+      ctx.restore();
+    }
+
+    // Pulses
+    for (const p of pulses) {
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      ctx.shadowColor = "rgba(255,255,255,0.40)";
+      ctx.shadowBlur = 10;
+
+      ctx.beginPath();
+      ctx.fillStyle = "rgba(255,255,255,0.82)";
+      ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Players
+    for (const p of players.values()) {
+      ctx.save();
+      ctx.translate(p.x, p.y);
+
+      ctx.shadowColor = "rgba(0,0,0,0.55)";
+      ctx.shadowBlur = 12;
+
+      ctx.beginPath();
+      ctx.fillStyle = p.color;
+      ctx.arc(0, 0, p.r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // inner shine
+      ctx.globalAlpha = 0.30;
+      ctx.beginPath();
+      ctx.fillStyle = "white";
+      ctx.arc(-p.r * 0.25, -p.r * 0.25, p.r * 0.45, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      // name
+      ctx.font = "12px ui-monospace, Menlo, Monaco, Consolas, monospace";
+      ctx.fillStyle = "rgba(255,255,255,0.92)";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "top";
+      ctx.shadowBlur = 0;
+      ctx.fillText(p.name, 0, p.r + 6);
+
+      // score
+      ctx.font = "11px ui-monospace, Menlo, Monaco, Consolas, monospace";
+      ctx.fillStyle = "rgba(255,255,255,0.72)";
+      ctx.fillText(String(p.score), 0, p.r + 20);
+
+      ctx.restore();
+    }
+  }
+
+  // Physics + collisions
+  function step(dt) {
+    const w = canvas.width / Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+    const h = canvas.height / Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+    // players drift
+    for (const p of players.values()) {
+      p.x += (p.vx * dt) / 1000;
+      p.y += (p.vy * dt) / 1000;
+
+      // gentle wander
+      p.vx += rand(-10, 10) * (dt / 1000);
+      p.vy += rand(-10, 10) * (dt / 1000);
+      p.vx = clamp(p.vx, -70, 70);
+      p.vy = clamp(p.vy, -70, 70);
+
+      // bounds
+      const pad = 18;
+      if (p.x < pad) { p.x = pad; p.vx *= -0.8; }
+      if (p.x > w - pad) { p.x = w - pad; p.vx *= -0.8; }
+      if (p.y < pad) { p.y = pad; p.vy *= -0.8; }
+      if (p.y > h - pad) { p.y = h - pad; p.vy *= -0.8; }
+    }
+
+    // bosses drift
+    for (const b of bosses) {
+      b.x += (b.vx * dt) / 1000;
+      b.y += (b.vy * dt) / 1000;
+
+      // bounce
+      const pad = 40;
+      if (b.x < pad) { b.x = pad; b.vx *= -0.85; }
+      if (b.x > w - pad) { b.x = w - pad; b.vx *= -0.85; }
+      if (b.y < pad) { b.y = pad; b.vy *= -0.85; }
+      if (b.y > h - pad) { b.y = h - pad; b.vy *= -0.85; }
+    }
+
+    // pulses move + expire
+    const t = now();
+    for (let i = pulses.length - 1; i >= 0; i--) {
+      const p = pulses[i];
+      p.x += (p.vx * dt) / 1000;
+      p.y += (p.vy * dt) / 1000;
+      if (t - p.born > p.life) pulses.splice(i, 1);
+    }
+
+    // collisions: pulse hits boss
+    for (let i = bosses.length - 1; i >= 0; i--) {
+      const b = bosses[i];
+      for (let j = pulses.length - 1; j >= 0; j--) {
+        const pu = pulses[j];
+        const dx = pu.x - b.x;
+        const dy = pu.y - b.y;
+        const rr = (pu.r + b.r) * (pu.r + b.r);
+        if (dx * dx + dy * dy <= rr) {
+          // hit
+          pulses.splice(j, 1);
+          b.hp -= pu.power;
+          const owner = players.get(pu.ownerId);
+          if (owner) owner.score += 1 + pu.power;
+
+          beep(320 + pu.power * 80, 60, 0.03);
+
+          if (b.hp <= 0) {
+            bosses.splice(i, 1);
+            // bonus to owner
+            if (owner) owner.score += 4;
+            notify("gift", { nickname: owner ? owner.name : "SYSTEM" }, "defeated the boss!");
+            beep(160, 160, 0.035);
+
+            // spawn next boss shortly so the loop continues
+            setTimeout(() => spawnBoss("respawn"), 850);
+            break;
+          }
+        }
+      }
+    }
+
+    // end round by time or winGoal
+    if (!gameFinished && roundStartAt) {
+      const elapsed = t - roundStartAt;
+      if (elapsed >= roundMs) {
+        const top = Array.from(players.values()).sort((a, b) => b.score - a.score)[0] || null;
+        endRound(top);
+      } else {
+        const top = Array.from(players.values()).sort((a, b) => b.score - a.score)[0] || null;
+        if (top && top.score >= winGoal) endRound(top);
+      }
+    }
+
+    // slowly decay charge
+    likeCharge = Math.max(0, likeCharge - (dt / 1000) * 0.03);
+  }
+
+  function tick() {
+    const t = now();
+    const dt = clamp(t - lastTick, 8, 40);
+    lastTick = t;
+
+    step(dt);
+    draw(dt);
+    updateHud();
+
+    requestAnimationFrame(tick);
+  }
+
+  // ===============================
+  // 4) TikTok message shape helpers
+  // ===============================
+  function getUserFromMessage(msg) {
+    const m = msg || {};
+    // Try common shapes
+    const u =
+      m.user ||
+      m.userInfo ||
+      m.sender ||
+      m.user_profile ||
+      m.data?.user ||
+      m.data?.userInfo ||
+      m.data?.sender ||
+      m;
+
+    return {
+      userId: normText(u.userId || u.id || u.uniqueId || u.uid || u.secUid || u.nickname || u.unique_id || ""),
+      uniqueId: normText(u.uniqueId || u.unique_id || u.username || u.handle || ""),
+      nickname: normText(u.nickname || u.displayName || u.name || u.uniqueId || u.unique_id || ""),
+      profilePictureUrl: normText(u.profilePictureUrl || u.avatar || u.avatarThumb || u.avatar_url || u.profilePic || u.pfp || ""),
+    };
+  }
+
+  function getChatTextFromMessage(msg) {
+    const m = msg || {};
+    // Common chat text fields
+    return normText(
+      m.comment ||
+      m.text ||
+      m.message ||
+      m.content ||
+      m.chat ||
+      m.data?.comment ||
+      m.data?.text ||
+      m.data?.message ||
+      ""
+    );
+  }
+
+  function getGiftSummary(msg) {
+    const m = msg || {};
+    const g = m.gift || m.giftInfo || m.data?.gift || m.data?.giftInfo || m;
+    const name = normText(g.giftName || g.name || g.gift_name || "Gift");
+    const diamonds = Number(g.diamondCount || g.diamond_count || g.diamonds || 0) || 0;
+    const count = Number(m.repeatCount || m.repeat_count || g.repeatCount || g.count || 1) || 1;
+    return { name, diamonds, count };
+  }
+
+  // ===============================
+  // 5) Mapping: join/action + optional shares
+  // ===============================
+  let client = null;
+  let pendingStart = false;
+
+  // “Join” is always allowed; action is optional but this template uses it.
+  function isJoinCommand(text) {
+    const cmd = normLower(getSetting("joinCommand", "join"));
+    const t = normLower(text);
+    if (!cmd) return false;
+    // allow "join", "!join", "/join"
+    return t === cmd || t === "!" + cmd || t === "/" + cmd || t.startsWith(cmd + " ");
+  }
+
+  function isActionCommand(text) {
+    const cmd = normLower(getSetting("actionCommand", "pulse"));
+    const t = normLower(text);
+    if (!cmd) return false;
+    return t === cmd || t === "!" + cmd || t === "/" + cmd || t.startsWith(cmd + " ");
+  }
+
+  function onChatMessage(data) {
+    try {
+      const msg = data || {};
+      const text = getChatTextFromMessage(msg);
+      const user = getUserFromMessage(msg);
+
+      if (!text) return;
+
+      // Join
+      if (isJoinCommand(text)) {
+        getOrCreatePlayer(user);
+        return;
+      }
+
+      // Action (requires join first)
+      if (isActionCommand(text)) {
+        const p = players.get(user.userId);
+        if (!p) return;
+        firePulse(p);
+        return;
+      }
+
+      // Optional: quick join by plain "hi"/anything? (disabled by default)
+    } catch (e) {
+      // keep stable
+      console.error("Error in chat handler:", e);
+    }
+  }
+
+  function onLikeMessage(data) {
+    try {
+      // Likes build charge meter
+      const inc = 0.015;
+      likeCharge = clamp(likeCharge + inc, 0, 1);
+      if (Math.random() < 0.08) beep(1080, 40, 0.012);
+      // optional notification (kept subtle)
+      // notify("like", getUserFromMessage(data), "liked");
     } catch (e) {
       console.error("Error in like handler:", e);
     }
-  });
+  }
 
-  client.on("join", (data) => {
+  function onGiftMessage(data) {
     try {
-      const u = getUserFromMessage(data);
-      // Join event can optionally count as join action (AI can decide)
-      state.counters.joins++;
-      flag({ who: u.nickname || u.uniqueId || "viewer", msg: "joined", pfp: u.avatar, tint: "tint-good" });
-      try { if (typeof aiOnJoin === "function") aiOnJoin(state, { user: u }); } catch(e){}
-    } catch(e){}
-  });
+      const user = getUserFromMessage(data);
+      const g = getGiftSummary(data);
 
-  // Share support (if TikTokClient emits it)
-  client.on("share", (data) => {
+      // Gifts: spawn bosses / boost charge
+      const power = clamp(Math.floor((g.diamonds || 0) / 10) + g.count, 1, 12);
+      for (let i = 0; i < Math.min(3, Math.ceil(power / 3)); i++) spawnBoss("gift");
+      likeCharge = clamp(likeCharge + 0.12 + power * 0.02, 0, 1);
+
+      notify("gift", user, `${g.name} x${g.count}`);
+      beep(260, 90, 0.03);
+    } catch (e) {
+      console.error("Error in gift handler:", e);
+    }
+  }
+
+  function onJoinMessage(data) {
     try {
-      const u = getUserFromMessage(data);
-      state.counters.shares++;
-      flag({ who: u.nickname || u.uniqueId || "viewer", msg: "shared", pfp: u.avatar, tint: "tint-pink" });
+      // Some platforms emit "join" event
+      const user = getUserFromMessage(data);
+      if (!user.userId) return;
+      // If join via event, treat as join
+      getOrCreatePlayer(user);
+    } catch (e) {
+      console.error("Error in join handler:", e);
+    }
+  }
 
-      // Optional: share as fallback for chat commands
-      const s = state.settings || {};
-      const mode = String(s.shareCountsAs || "action");
-      const allow = !!s.shareAsAction;
+  function onShareMessage(data) {
+    try {
+      const user = getUserFromMessage(data);
+      if (!user.userId) return;
 
-      if (allow) {
-        if (mode === "action") {
-          actionAttack(u, 3);
-        } else if (mode === "join") {
-          joinAction(u);
-        } else if (mode === "hype") {
-          addHype(0.18);
-        }
+      const allowJoin = normLower(getSetting("allowShareForJoin", "yes")) === "yes";
+      const allowAction = normLower(getSetting("allowShareForAction", "no")) === "yes";
+
+      if (allowJoin && !players.has(user.userId)) {
+        getOrCreatePlayer(user);
+        notify("join", user, "shared (counts as join)");
+        return;
       }
 
-      try { if (typeof aiOnShare === "function") aiOnShare(state, { user: u }); } catch(e){}
+      if (allowAction && players.has(user.userId)) {
+        const p = players.get(user.userId);
+        firePulse(p);
+        notify("chat", user, "shared (counts as action)");
+        return;
+      }
     } catch (e) {
       console.error("Error in share handler:", e);
     }
-  });
-
-  client.connect();
-}
-
-/* ============================================================
-   Message helpers (robust across shapes)
-   ============================================================ */
-function getUserFromMessage(msg) {
-  const m = msg || {};
-  const u = m.user || m.userInfo || m.author || m.sender || m.user_id || m.userId || {};
-  const userId = String(u.userId || u.id || m.userId || m.user_id || "");
-  const nickname = String(u.nickname || u.displayName || u.uniqueId || u.displayid || u.displayId || u.username || "");
-  const uniqueId = String(u.uniqueId || u.unique_id || u.displayid || u.displayId || u.username || nickname || "");
-  const avatar = getAvatarUrlFromUser(u);
-  return { userId, nickname, uniqueId, avatar };
-}
-
-function getAvatarUrlFromUser(u) {
-  const x = u || {};
-  const p =
-    x.avatarThumb ||
-    x.avatar_thumb ||
-    x.avatarMedium ||
-    x.avatar_medium ||
-    x.avatarLarge ||
-    x.avatar_large ||
-    x.avatar ||
-    x.profilePicture ||
-    x.profile_picture ||
-    "";
-  if (typeof p === "string") return p;
-  if (p && typeof p === "object") {
-    if (Array.isArray(p.urlList) && p.urlList[0]) return String(p.urlList[0]);
-    if (Array.isArray(p.url_list) && p.url_list[0]) return String(p.url_list[0]);
-    if (p.url) return String(p.url);
-  }
-  return "";
-}
-
-function getChatTextFromMessage(msg) {
-  const m = msg || {};
-  const t = m.comment || m.text || m.message || m.msg || m.content || m.chat || "";
-  if (typeof t === "string") return t;
-  return String(t || "");
-}
-
-function normalizeLike(m) {
-  const mm = m || {};
-  const c = Number(mm.likeCount || mm.count || mm.likes || 1) || 1;
-  return { type: "like", count: c };
-}
-
-function normalizeGift(m) {
-  const mm = m || {};
-  const giftName = String(mm.giftName || (mm.gift && mm.gift.name) || mm.name || "gift");
-  const repeat = Number(mm.repeatCount || mm.repeat || mm.count || 1) || 1;
-  return { type: "gift", giftName, repeat };
-}
-
-/* ============================================================
-   Command parsing (host configurable)
-   ============================================================ */
-function normalizeJoinText(text) {
-  const s = state.settings || {};
-  const joinCmd = String(s.joinCommand || "join").toLowerCase();
-  const t = String(text || "").trim().toLowerCase();
-
-  // allow "join", "!join", "/join"
-  if (t === joinCmd) return true;
-  if (t === "!" + joinCmd) return true;
-  if (t === "/" + joinCmd) return true;
-
-  // allow share-workaround in chat if host wants (some viewers use "share" in chat)
-  if (t === "share" && String(s.shareCountsAs || "") === "join") return true;
-  return false;
-}
-
-function normalizeActionText(text) {
-  const s = state.settings || {};
-  const actCmd = String(s.actionCommand || "attack").toLowerCase();
-  const t = String(text || "").trim().toLowerCase();
-
-  if (t === actCmd) return true;
-  if (t === "!" + actCmd) return true;
-  if (t === "/" + actCmd) return true;
-
-  // allow "share" typed in chat to count as action if desired
-  if (t === "share" && String(s.shareCountsAs || "") === "action") return true;
-
-  return false;
-}
-
-/* ============================================================
-   Start / flow
-   ============================================================ */
-function startOffline() {
-  hideOverlay();
-  setStatus("Disconnected (Offline Mode)", false);
-  flag({ who: "SYSTEM", msg: "Offline Mode: game is running without TikTok connection", pfp: "", tint: "tint-warn" });
-}
-
-function beginStart() {
-  ensureCoreSettingsUI();
-  readSettings(); // always update settings on start click
-
-  // Always ensure game is mounted/running (even if connection fails)
-  mountCanvas();
-  try { if (typeof aiInit === "function") aiInit(state); } catch(e){}
-
-  const liveId = String(liveIdInput && liveIdInput.value ? liveIdInput.value : "").trim().replace(/^@/,"");
-  if (!liveId) {
-    // allow offline start
-    startOffline();
-    return;
   }
 
-  pendingStart = true;
-  setStatus("Connecting…", false);
-  try {
-    setupTikTokClient(liveId);
-  } catch (e) {
-    pendingStart = false;
-    setStatus("Error: " + (e && e.message ? e.message : "Connection failed"), false);
-    showOverlay();
-  }
-}
+  // ===============================
+  // 6) TikTok client setup / connect
+  // ===============================
+  function setupTikTokClient(liveId) {
+    if (!liveId) throw new Error("liveId is required");
 
-/* ============================================================
-   AI REGION
-   - The builder inserts game-specific code here.
-   - MUST define: aiInit, aiOnChat, aiOnLike, aiOnGift
-   - Optional: aiOnShare, aiOnJoin
-   ============================================================ */
-// === AI_REGION_START ===
-
-function aiInit(state) {
-  // Default: nothing extra needed. Canvas engine already runs.
-}
-
-function aiOnChat(state, ev) {
-  // Default: no extra routing.
-  // You can add more commands here, but ALWAYS make them host-configurable
-  // by reading state.settings and/or adding a new setting field with ensureSettingField().
-}
-
-function aiOnLike(state, like) {
-  // Default: likes already fill hype meter via likeBoost().
-}
-
-function aiOnGift(state, gift) {
-  // Default: gifts already trigger giftPower().
-}
-
-// Optional
-function aiOnShare(state, share) {
-  // Default: share behavior is handled by settings in the share event.
-}
-
-// === AI_REGION_END ===
-
-/* ============================================================
-   Boot
-   ============================================================ */
-(function boot() {
-  try {
-    // Show overlay until start
-    showOverlay();
-    setStatus("Not connected", false);
-
-    // Ensure configurable settings exist even if server didn’t inject fields
-    ensureCoreSettingsUI();
-    readSettings();
-
-    // Mount game immediately so it never looks blank
-    mountCanvas();
-    try { if (typeof aiInit === "function") aiInit(state); } catch(e){}
-
-    if (startGameBtn) {
-      startGameBtn.addEventListener("click", () => {
-        // Refresh settings right before starting
-        beginStart();
-      });
+    if (client && client.socket) {
+      try { client.socket.close(); } catch (e) { /* ignore */ }
     }
 
-    // Helpful first banner so host sees motion instantly
-    flag({ who: "SYSTEM", msg: "Game ready. Set commands, then Connect & Start.", pfp: "", tint: "tint-aqua" });
-  } catch (e) {
-    console.error("boot error", e);
-    setStatus("Error starting game", false);
+    if (typeof TikTokClient === "undefined") {
+      throw new Error("TikTokClient is not available. Check platform injection (tiktok-client.js).");
+    }
+
+    // proto is required for protobuf decode on some deployments
+    const hasProto = (typeof proto !== "undefined") || (typeof window !== "undefined" && typeof window.proto !== "undefined");
+    if (!hasProto) {
+      throw new Error("proto is not available. Platform must inject proto bundle (no proto.bundle.js should be requested by the game).");
+    }
+
+    client = new TikTokClient(liveId);
+
+    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
+    if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
+      client.setAccessToken(CHATTOK_CREATOR_TOKEN);
+    }
+
+    client.on("connected", () => {
+      setStatus("Connected.");
+      // Only start game once we know we're connected
+      if (pendingStart && !gameStarted) beginGameLoop();
+    });
+
+    client.on("disconnected", (reason) => {
+      const msg = reason || "Connection closed";
+      setStatus("Disconnected: " + msg);
+      if (!gameStarted) pendingStart = false; // allow retry
+    });
+
+    client.on("error", (err) => {
+      const m = err && err.message ? err.message : "Unknown error";
+      setStatus("Error: " + m);
+    });
+
+    // Events
+    client.on("chat", onChatMessage);
+    client.on("gift", onGiftMessage);
+    client.on("like", onLikeMessage);
+    client.on("join", onJoinMessage);
+
+    // Not all clients emit share; safe to attach
+    try { client.on("share", onShareMessage); } catch { /* ignore */ }
+
+    client.connect();
   }
+
+  // ===============================
+  // 7) START BUTTON behavior
+  // ===============================
+  function startPressed() {
+    try {
+      const liveId = normText(liveIdInput ? liveIdInput.value : "");
+      if (!liveId) {
+        setStatus("Enter a LIVE ID (username without @).");
+        beep(160, 120, 0.03);
+        return;
+      }
+
+      // Apply settings immediately to HUD (shows commands)
+      updateHud();
+      resize();
+
+      pendingStart = true;
+      setStatus("Connecting…");
+
+      setupTikTokClient(liveId);
+    } catch (e) {
+      pendingStart = false;
+
+      // If TikTok isn’t available, optionally run demo
+      const demo = normLower(getSetting("demoMode", "yes")) === "yes";
+      if (demo) {
+        setStatus((e && e.message ? e.message : "Offline") + " — Running demo mode.");
+        showOverlay(false);
+        beginGameLoop();
+        seedDemoBots();
+        return;
+      }
+
+      setStatus(e && e.message ? e.message : "Start failed.");
+    }
+  }
+
+  if (startGameBtn) {
+    startGameBtn.addEventListener("click", () => {
+      // Unlock audio context via user gesture
+      try { beep(880, 20, 0.001); } catch { /* ignore */ }
+      startPressed();
+    });
+  }
+
+  // ===============================
+  // 8) Demo mode: never blank
+  // ===============================
+  let demoSeeded = false;
+  function seedDemoBots() {
+    if (demoSeeded) return;
+    demoSeeded = true;
+
+    const bots = [
+      { userId: "demo_1", nickname: "DemoFox" },
+      { userId: "demo_2", nickname: "DemoWave" },
+      { userId: "demo_3", nickname: "DemoNova" },
+      { userId: "demo_4", nickname: "DemoSpark" },
+    ];
+    for (const b of bots) getOrCreatePlayer(b);
+    likeCharge = 0.4;
+
+    // periodic actions
+    setInterval(() => {
+      if (!gameStarted || gameFinished) return;
+      const arr = Array.from(players.values());
+      if (!arr.length) return;
+      const p = arr[Math.floor(Math.random() * arr.length)];
+      firePulse(p);
+    }, 1150);
+
+    // periodic likes
+    setInterval(() => {
+      if (!gameStarted || gameFinished) return;
+      likeCharge = clamp(likeCharge + 0.03, 0, 1);
+    }, 420);
+
+    // occasional gift/boss
+    setInterval(() => {
+      if (!gameStarted || gameFinished) return;
+      spawnBoss("demo");
+    }, 7200);
+  }
+
+  // Update HUD initially
+  updateHud();
+  setStatus("Disconnected");
+
+  // If platform injected scripts slowly, the user can still start when ready
+  showOverlay(true);
+
+  // ===============================
+  // ✅ WORKING TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
+  // ===============================
+  /*
+  // 7. TikTok message handling
+  // ===============================
+
+  function handleTeamJoin(text, user) {
+      const maybeTeam = normalizeTeamText(text);
+      if (!maybeTeam) return;
+
+      // Assign or move team.
+      userTeams.set(user.userId, maybeTeam);
+      console.log(`${user.nickname} joined team ${maybeTeam}`);
+  }
+
+  function handleAnswer(text, user) {
+      if (!gameStarted || gameFinished) return;
+      if (!userTeams.has(user.userId)) return; // must be on a team first
+
+      const answer = normalizeAnswerText(text);
+      if (!answer) return;
+
+      // Only allow one answer per question per user
+      if (answeredUsersThisQuestion.has(user.userId)) return;
+      answeredUsersThisQuestion.set(user.userId, true);
+
+      const team = userTeams.get(user.userId);
+      const q = getCurrentQuestion();
+      if (!q) return;
+
+      // Track participation per round
+      if (roundAnswerCounts[team] !== undefined) {
+          roundAnswerCounts[team] += 1;
+      }
+
+      if (answer === q.correct) {
+          teamScores[team]++;
+          teamRoundScores[team]++;
+          updateScoreDisplay();
+          flashCorrectAnswer(user.nickname, team, answer);
+      }
+
+      updateRoundDuelBar();
+  }
+
+  function onChatMessage(data) {
+      try {
+          const msg = data || {};
+          const text = getChatTextFromMessage(msg);
+          const user = getUserFromMessage(msg);
+
+          if (!text) return;
+
+          // 1) Team selection ("red" / "blue"; any case)
+          handleTeamJoin(text, user);
+
+          // 2) Answer selection ("A"/"B"/"C"/"D"; any case)
+          handleAnswer(text, user);
+      } catch (e) {
+          console.error("Error in chat handler:", e);
+      }
+  }
+
+  function onGiftMessage(data) {
+      try {
+          // You can optionally use gifts to boost scores, etc.
+          console.log("Gift message:", data);
+      } catch (e) {
+          console.error("Error in gift handler:", e);
+      }
+  }
+
+  // ===============================
+  // 8. TikTok client setup / connect
+  // ===============================
+
+  function setupTikTokClient(liveId) {
+      if (!liveId) {
+          throw new Error("liveId is required");
+      }
+
+      if (client && client.socket) {
+          try {
+              client.socket.close();
+          } catch (e) {
+              console.warn("Error closing previous socket:", e);
+          }
+      }
+
+      if (typeof TikTokClient === "undefined") {
+          throw new Error("TikTokClient is not available. Check tiktok-client.js.");
+      }
+
+      client = new TikTokClient(liveId);
+
+      // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
+      if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
+          client.setAccessToken(CHATTOK_CREATOR_TOKEN);
+      }
+
+      client.on("connected", () => {
+          console.log("Connected to TikTok hub.");
+          if (statusText) statusText.textContent = "Connected to TikTok LIVE.";
+          if (statusTextInGame) statusTextInGame.textContent = "Connected.";
+
+          // Only start game once we know we're connected
+          if (pendingStart && !gameStarted) {
+              beginGame();
+          }
+      });
+
+      client.on("disconnected", (reason) => {
+          console.log("Disconnected from TikTok hub:", reason);
+          const msg = reason || "Connection closed";
+          if (statusText) statusText.textContent = "Disconnected: " + msg;
+          if (statusTextInGame) statusTextInGame.textContent = "Disconnected: " + msg;
+
+          if (!gameStarted) {
+              // Connection failed before game start; allow retry
+              pendingStart = false;
+          }
+      });
+
+      client.on("error", (err) => {
+          console.error("TikTok client error:", err);
+          if (statusText) statusText.textContent =
+              "Error: " + (err && err.message ? err.message : "Unknown");
+      });
+
+      client.on("chat", onChatMessage);
+      client.on("gift", onGiftMessage);
+      client.on("like", (data) => {
+          // Optionally use likes later
+          // console.log("Like message:", data);
+      });
+
+      client.connect();
+  }
+  */
 })();

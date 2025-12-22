@@ -1,12 +1,10 @@
 /* server.js — ChatTok Builder API (template-first, hardened)
-   Fixes / guarantees:
-   - Single app.listen (no HOST undefined, no double listen)
-   - CORS + OPTIONS preflight always succeeds for GitHub Pages + localhost dev
-   - Safe-by-default CORS (NOT "allow all" when env is empty)
-   - Templates resolve from repo root OR /templates OR /api
-   - CSS stage does NOT require idea text
-   - AI_REGION generation is sanitized + fallback-safe
-   - /health is fast and cache-proof
+   FIX INCLUDED (important):
+   - ✅ CORS preflight no longer crashes (removed invalid allowedHeaders function)
+   - ✅ OPTIONS always returns 204 with proper CORS headers
+   - ✅ Single app.listen
+   - ✅ Safe allowlist origins (defaults include https://ogdeig.github.io)
+   - ✅ /health fast + no-cache
 */
 
 const express = require("express");
@@ -15,7 +13,7 @@ const rateLimit = require("express-rate-limit");
 const fs = require("fs");
 const path = require("path");
 
-// dotenv optional (Render injects env vars); good for local dev
+// dotenv optional (Render injects env vars); useful for local dev
 try { require("dotenv").config(); } catch {}
 
 const app = express();
@@ -23,13 +21,15 @@ app.set("trust proxy", 1);
 
 const PORT = Number(process.env.PORT || 3000);
 
-// Parse JSON with a clear error if malformed
+// -----------------------------
+// Core middleware
+// -----------------------------
 app.use(express.json({
   limit: "10mb",
   verify: (req, _res, buf) => { req.rawBody = buf?.toString("utf8") || ""; }
 }));
 
-// Never cache API responses (prevents "stale build" during rapid testing)
+// Never cache API responses (prevents stale builds during rapid testing)
 app.use((req, res, next) => {
   if (req.path.startsWith("/api") || req.path === "/health") {
     res.setHeader("Cache-Control", "no-store, max-age=0");
@@ -38,9 +38,9 @@ app.use((req, res, next) => {
   next();
 });
 
-// Node 18+ required for global fetch
+// Node 18+ required for global fetch (Render Node 20+ is fine)
 if (typeof fetch !== "function") {
-  console.error("ERROR: global fetch is missing. Use Node 18+ (Render Node 20+ is fine).");
+  console.error("ERROR: global fetch is missing. Use Node 18+.");
   process.exit(1);
 }
 
@@ -56,6 +56,7 @@ app.use(rateLimit({
 
 // -----------------------------
 // CORS (safe-by-default)
+// IMPORTANT: allowedHeaders MUST be string/array (NOT a function)
 // -----------------------------
 function buildAllowedOrigins() {
   const env = String(process.env.ALLOWED_ORIGINS || "")
@@ -89,16 +90,22 @@ const corsOptions = {
     return cb(new Error(`CORS blocked origin: ${origin}`), false);
   },
   methods: ["GET", "POST", "OPTIONS"],
-  // Reflect requested headers so preflight doesn't randomly fail
-  allowedHeaders: (req) => {
-    const hdr = req.header("Access-Control-Request-Headers");
-    if (hdr) return hdr;
-    return ["Content-Type", "Authorization", "X-Requested-With"];
-  },
+  // MUST be an array or string (functions here can cause header crashes on Render)
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "X-Requested-With",
+    "Accept",
+    "Origin",
+    "Cache-Control",
+    "Pragma"
+  ],
   optionsSuccessStatus: 204,
+  preflightContinue: false,
 };
 
 app.use(cors(corsOptions));
+// Ensure all preflights succeed quickly
 app.options("*", cors(corsOptions));
 
 // Friendly JSON response if CORS blocks
@@ -110,7 +117,7 @@ app.use((err, _req, res, next) => {
 });
 
 // JSON parse errors
-app.use((err, req, res, next) => {
+app.use((err, _req, res, next) => {
   if (err && err.type === "entity.parse.failed") {
     return res.status(400).json({
       ok: false,
@@ -126,9 +133,7 @@ app.get("/favicon.ico", (_req, res) => res.status(204).end());
 // -----------------------------
 // Helpers
 // -----------------------------
-function assert(cond, msg) {
-  if (!cond) throw new Error(msg);
-}
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
 
 function normalizeStage(stage) {
   const s = String(stage || "").toLowerCase().trim();
@@ -203,14 +208,10 @@ function parseJsonLoose(rawText) {
 function resolveTemplatePath(fileName) {
   const cwd = process.cwd();
   const candidates = [
-    // root
     path.join(cwd, fileName),
-    // /templates
     path.join(cwd, "templates", fileName),
-    // /api layouts
     path.join(cwd, "api", fileName),
     path.join(cwd, "api", "templates", fileName),
-    // __dirname fallbacks
     path.join(__dirname, fileName),
     path.join(__dirname, "templates", fileName),
     path.join(__dirname, "api", fileName),
@@ -218,9 +219,7 @@ function resolveTemplatePath(fileName) {
   ];
 
   for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) return p;
-    } catch {}
+    try { if (fs.existsSync(p)) return p; } catch {}
   }
   return "";
 }
@@ -382,11 +381,6 @@ async function generateSpec({ apiKey, model, idea, templateId }) {
   spec.defaultSettings.roundSeconds = Number(spec.defaultSettings.roundSeconds || 20);
   spec.defaultSettings.winGoal = Number(spec.defaultSettings.winGoal || 100);
 
-  // Allow server to choose template (if model suggests)
-  if (spec.templateId && !spec.templateIdFromUser) {
-    spec.templateIdFromUser = false;
-  }
-
   return spec;
 }
 
@@ -421,7 +415,6 @@ function sanitizeAiRegion(code) {
   const needs = ["function aiInit", "function aiOnChat", "function aiOnLike", "function aiOnGift"];
   for (const n of needs) if (!c.includes(n)) return { ok: false, reason: `missing ${n}` };
 
-  // Disallow unsafe patterns
   if (/\bctx\.on\s*\(/.test(c)) return { ok: false, reason: "ctx.on() not allowed" };
   if (/\bonConnect\b/.test(c)) return { ok: false, reason: "onConnect not allowed" };
   if (/\brequire\s*\(/.test(c) || /\bimport\s+/.test(c)) return { ok: false, reason: "require/import not allowed" };
@@ -461,10 +454,7 @@ async function generateAiRegion({ apiKey, model, idea, spec, templateId, changeR
 
   const code = stripCodeFences(extractAssistantText(raw)).trim();
   const checked = sanitizeAiRegion(code);
-  if (!checked.ok) {
-    console.warn("AI_REGION rejected:", checked.reason);
-    return fallbackAiRegion();
-  }
+  if (!checked.ok) return fallbackAiRegion();
   return checked.code;
 }
 
@@ -485,11 +475,9 @@ function injectSpecIntoGameJs(gameTemplate, spec) {
   return String(gameTemplate || "").replace("__SPEC_JSON__", json);
 }
 
-// Ensure token rule + connect-first behavior
 function enforceLockedTikTokAndConnectFirst(jsText) {
   let out = String(jsText || "");
 
-  // If some older template ever had a direct setAccessToken(window.CHATTOK_CREATOR_TOKEN||"")
   out = out.replace(
     /client\.setAccessToken\(\s*window\.CHATTOK_CREATOR_TOKEN\s*\|\|\s*""\s*\)\s*;?/g,
     `
@@ -503,10 +491,9 @@ function enforceLockedTikTokAndConnectFirst(jsText) {
 `.trim()
   );
 
-  // CONNECT-FIRST: do not hide overlay on Start click (overlay hides on connected)
+  // Don't hide overlay on Start click (hide after connected)
   out = out.replace(/\n\s*hideOverlay\(\)\s*;\s*\n/g, "\n      // CONNECT-FIRST: keep overlay open until 'connected' event\n");
 
-  // Ensure the connected handler hides overlay (if template did not already)
   if (!out.includes("CONNECT-FIRST: hide overlay on connected")) {
     out = out.replace(
       /ctx\.connected\s*=\s*true\s*;\s*\n/g,
@@ -556,7 +543,7 @@ function renderIndexHtml(indexTemplate, spec) {
 }
 
 // -----------------------------
-// Validations (prevent “blank games”)
+// Validations
 // -----------------------------
 function validateGeneratedHtml(html) {
   const requiredIds = ["setupOverlay", "startGameBtn", "liveIdInput", "gameRoot", "flags"];
@@ -588,11 +575,7 @@ function validateGeneratedJs(js) {
 // Routes
 // -----------------------------
 app.get("/", (_req, res) => {
-  res.json({
-    ok: true,
-    service: "builder-api",
-    hint: "Use GET /health or POST /api/generate",
-  });
+  res.json({ ok: true, service: "builder-api", hint: "Use GET /health or POST /api/generate" });
 });
 
 app.get("/health", (_req, res) => {
@@ -609,7 +592,6 @@ app.get("/health", (_req, res) => {
   });
 });
 
-// POST /api/generate
 app.post("/api/generate", async (req, res) => {
   try {
     const stage = normalizeStage(req.body?.stage);
@@ -621,7 +603,7 @@ app.post("/api/generate", async (req, res) => {
     const ctxObj = req.body?.context && typeof req.body.context === "object" ? req.body.context : {};
     const ctxSpec = ctxObj.spec || null;
 
-    // ✅ CSS stage never needs idea (theme-only)
+    // CSS stage never needs idea (theme-only)
     if (!wantBundle && stage === "css") {
       const css = injectThemeVars(TEMPLATES.css, theme);
       validateGeneratedCss(css);
@@ -635,7 +617,7 @@ app.post("/api/generate", async (req, res) => {
 
     // HTML/JS/BUNDLE require idea
     assert(idea || wantBundle, "Missing idea text.");
-    assert(idea, "Missing idea text."); // bundle/html/js require it
+    assert(idea, "Missing idea text.");
 
     const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
     assert(apiKey, "OPENAI_API_KEY is blank/missing in Render Environment Variables.");
@@ -643,7 +625,6 @@ app.post("/api/generate", async (req, res) => {
     const modelSpec = String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim();
     const modelJs = String(process.env.OPENAI_MODEL_JS || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
 
-    // HTML stage
     if (!wantBundle && stage === "html") {
       const spec = await generateSpec({ apiKey, model: modelSpec, idea, templateId });
       const html = renderIndexHtml(TEMPLATES.index, spec);
@@ -651,7 +632,6 @@ app.post("/api/generate", async (req, res) => {
       return res.json({ ok: true, stage, file: { name: "index.html", content: html }, context: { spec, templateId } });
     }
 
-    // JS stage
     if (!wantBundle && stage === "js") {
       const spec = ctxSpec || (await generateSpec({ apiKey, model: modelSpec, idea, templateId }));
       const aiCode = await generateAiRegion({ apiKey, model: modelJs, idea, spec, templateId });
@@ -696,7 +676,6 @@ app.post("/api/generate", async (req, res) => {
   }
 });
 
-// POST /api/edit (v1)
 app.post("/api/edit", async (req, res) => {
   try {
     const remaining = Number(req.body?.remainingEdits ?? 0);
@@ -720,7 +699,6 @@ app.post("/api/edit", async (req, res) => {
         ok: true,
         remainingEdits: remaining - 1,
         patches: [{ name: "style.css", content: css }],
-        notes: "Re-injected theme vars into style.css template.",
       });
     }
 
@@ -756,7 +734,6 @@ app.post("/api/edit", async (req, res) => {
       ok: true,
       remainingEdits: remaining - 1,
       patches: [{ name: "game.js", content: newJs }],
-      notes: "Updated AI_REGION in game.js.",
     });
   } catch (err) {
     console.error("/api/edit error:", err);
@@ -774,8 +751,4 @@ app.post("/api/edit", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Builder API running on port ${PORT}`);
   console.log(`Allowed origins: ${allowedOrigins.join(", ")}`);
-  try {
-    const p = resolveTemplatePath("index.template.html");
-    console.log(`index.template.html resolved: ${p || "(NOT FOUND)"}`);
-  } catch {}
 });

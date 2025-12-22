@@ -112,9 +112,149 @@
     </div>
   </div>
 
-  <!-- TikTok client stack -->
-  <script src="proto.bundle.js"></script>
-  <script src="tiktok-client.js"></script>
-  <script src="game.js"></script>
+  <!--
+    PROTO + TIKTOK STACK LOADER
+    Fixes: proto.bundle.js 404 + "proto is not defined"
+    Strategy:
+      - If window.proto already exists (host injected), do nothing.
+      - Else try multiple candidate URLs for proto.bundle.js.
+      - Only load tiktok-client.js AFTER proto exists.
+      - Only load game.js AFTER TikTokClient exists.
+  -->
+  <script>
+    (function () {
+      const statusText = document.getElementById("statusText");
+      const statusTextInGame = document.getElementById("statusTextInGame");
+
+      function setStatus(msg) {
+        try { if (statusText) statusText.textContent = msg; } catch {}
+        try { if (statusTextInGame) statusTextInGame.textContent = msg; } catch {}
+      }
+
+      // Simple script loader
+      function loadScript(url) {
+        return new Promise((resolve, reject) => {
+          const s = document.createElement("script");
+          s.src = url;
+          s.async = true;
+          s.onload = () => resolve(url);
+          s.onerror = () => reject(new Error("Failed to load: " + url));
+          document.head.appendChild(s);
+        });
+      }
+
+      function uniq(list) {
+        const out = [];
+        const seen = new Set();
+        for (const x of list) {
+          const v = (x || "").trim();
+          if (!v) continue;
+          if (seen.has(v)) continue;
+          seen.add(v);
+          out.push(v);
+        }
+        return out;
+      }
+
+      function originFromRef() {
+        try {
+          const ref = document.referrer || location.href;
+          const u = new URL(ref);
+          return u.origin;
+        } catch {
+          return "";
+        }
+      }
+
+      async function loadFirstWorking(candidates, isReady) {
+        const tries = uniq(candidates);
+        const errors = [];
+        for (const url of tries) {
+          try {
+            await loadScript(url + (url.includes("?") ? "&" : "?") + "v=" + Date.now());
+            if (!isReady || isReady()) return { ok: true, url };
+            errors.push("Loaded but not ready: " + url);
+          } catch (e) {
+            errors.push(String(e && e.message ? e.message : e));
+          }
+        }
+        return { ok: false, errors, tried: tries };
+      }
+
+      // Candidates for proto.bundle.js (covers common host + game-folder layouts)
+      const O = originFromRef();
+      const protoCandidates = [
+        "proto.bundle.js",
+        "assets/proto.bundle.js",
+        "reference/proto.bundle.js",
+
+        "/proto.bundle.js",
+        "/assets/proto.bundle.js",
+        "/reference/proto.bundle.js",
+
+        O ? (O + "/proto.bundle.js") : "",
+        O ? (O + "/assets/proto.bundle.js") : "",
+        O ? (O + "/reference/proto.bundle.js") : ""
+      ];
+
+      const tiktokCandidates = [
+        "tiktok-client.js",
+        "assets/tiktok-client.js",
+        "reference/tiktok-client.js",
+
+        "/tiktok-client.js",
+        "/assets/tiktok-client.js",
+        "/reference/tiktok-client.js",
+
+        O ? (O + "/tiktok-client.js") : "",
+        O ? (O + "/assets/tiktok-client.js") : "",
+        O ? (O + "/reference/tiktok-client.js") : ""
+      ];
+
+      async function boot() {
+        try {
+          // 1) proto
+          if (typeof window.proto === "undefined") {
+            setStatus("Loading TikTok protocol…");
+            const protoRes = await loadFirstWorking(
+              protoCandidates,
+              () => typeof window.proto !== "undefined"
+            );
+
+            if (!protoRes.ok) {
+              console.error("Proto load failed:", protoRes);
+              setStatus("ERROR: proto.bundle.js not found in preview. Contact support or update host script path.");
+              return; // stop: prevents 'proto is not defined' crashes
+            }
+          }
+
+          // 2) TikTokClient
+          if (typeof window.TikTokClient === "undefined") {
+            setStatus("Loading TikTok client…");
+            const ttRes = await loadFirstWorking(
+              tiktokCandidates,
+              () => typeof window.TikTokClient !== "undefined"
+            );
+
+            if (!ttRes.ok) {
+              console.error("tiktok-client load failed:", ttRes);
+              setStatus("ERROR: tiktok-client.js not found in preview.");
+              return;
+            }
+          }
+
+          // 3) game.js (always local to the game folder)
+          setStatus("Starting game…");
+          await loadScript("game.js" + "?v=" + Date.now());
+          setStatus("Ready");
+        } catch (e) {
+          console.error("Boot error:", e);
+          setStatus("ERROR: Failed to boot game scripts.");
+        }
+      }
+
+      boot();
+    })();
+  </script>
 </body>
 </html>

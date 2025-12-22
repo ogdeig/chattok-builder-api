@@ -1,40 +1,44 @@
 /* =========================================================
-   ChatTok Game Template — style.template.css (FULL)
-   - 9:16 game frame that stays readable on desktop + mobile
-   - Setup overlay on top of game (no separate pages)
-   - “Flags” notifications area on right
-   - Theme variables are injected by API (do not remove :root vars)
+   ChatTok Game Template — style.template.css (FULL REBUILD)
+   Goals:
+   - Always shows a clean 9:16 game frame (readable on desktop)
+   - Setup overlay sits on top of the game (same screen)
+   - No dependency on Tailwind or external CSS
+   - Uses injected theme vars from API (keep :root vars)
    ========================================================= */
 
+/* ---------- Theme (Injected by API) ---------- */
 :root{
-  /* Injected by API (server.js injectThemeVars) */
-  --pink:#ff0050;
-  --aqua:#00f2ea;
-  --bg:#050b17;
+  /* These are injected/replaced by the API. Keep them. */
+  --primary: #ff0050;
+  --secondary: #00f2ea;
+  --bg: #050b17;
 
-  /* Base UI */
-  --panel: rgba(255,255,255,.06);
-  --panel2: rgba(255,255,255,.04);
-  --line: rgba(255,255,255,.10);
-
-  --text:#ffffff;
+  /* UI */
+  --text: #ffffff;
   --muted: rgba(255,255,255,.72);
 
-  --good:#2ee59d;
-  --warn:#ffcc00;
-  --bad:#ff4d4d;
+  --panel: rgba(255,255,255,.07);
+  --panel2: rgba(255,255,255,.04);
+  --line: rgba(255,255,255,.12);
+
+  --good: #2ee59d;
+  --warn: #ffcc00;
+  --bad:  #ff4d4d;
 
   --shadow: 0 18px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,255,255,.08);
+
   --r: 18px;
   --r2: 14px;
 
-  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-
   --btn: linear-gradient(180deg, rgba(255,255,255,.14), rgba(255,255,255,.06));
   --btnHover: linear-gradient(180deg, rgba(255,255,255,.20), rgba(255,255,255,.08));
-  --btnPrimary: linear-gradient(180deg, rgba(0,242,234,.26), rgba(255,0,80,.10));
+  --btnPrimary: linear-gradient(180deg, rgba(0,242,234,.24), rgba(255,0,80,.10));
+
+  --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
+/* ---------- Global Reset ---------- */
 *{ box-sizing:border-box; }
 html,body{ height:100%; }
 body{
@@ -42,10 +46,20 @@ body{
   color: var(--text);
   font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
   background:
-    radial-gradient(1200px 900px at 20% 0%, rgba(0,242,234,.12), transparent 55%),
-    radial-gradient(1200px 900px at 85% 20%, rgba(255,0,80,.14), transparent 55%),
+    radial-gradient(1200px 900px at 18% 0%, color-mix(in srgb, var(--secondary) 18%, transparent), transparent 55%),
+    radial-gradient(1200px 900px at 82% 18%, color-mix(in srgb, var(--primary) 18%, transparent), transparent 55%),
     linear-gradient(180deg, var(--bg), #071a35 70%, #081428);
   overflow:hidden;
+}
+
+/* Fallback if color-mix isn't supported */
+@supports not (color-mix(in srgb, #fff 50%, transparent)) {
+  body{
+    background:
+      radial-gradient(1200px 900px at 18% 0%, rgba(0,242,234,.12), transparent 55%),
+      radial-gradient(1200px 900px at 82% 18%, rgba(255,0,80,.14), transparent 55%),
+      linear-gradient(180deg, var(--bg), #071a35 70%, #081428);
+  }
 }
 
 #app{
@@ -57,58 +71,56 @@ body{
   padding: 10px;
 }
 
-/* ===============================
-   9:16 Game Root / Frame
-   =============================== */
+/* =========================================================
+   GAME FRAME (9:16)
+   ========================================================= */
 
 .gameRoot{
-  position:relative;
-  width: min(92vw, 760px);
-  height: calc(width * 1.7777);
-  /* fallback for browsers that don’t support calc(width*ratio) */
-  max-height: 92vh;
+  position: relative;
+  width: min(92vw, 780px);
   aspect-ratio: 9 / 16;
+  max-height: 94vh;
   display:flex;
   align-items:center;
   justify-content:center;
 }
 
 .gameFrame{
-  width:100%;
-  height:100%;
+  width: 100%;
+  height: 100%;
   border-radius: 22px;
-  background: rgba(0,0,0,.28);
-  border: 1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.30);
+  border: 1px solid rgba(255,255,255,.12);
   box-shadow: var(--shadow);
   overflow:hidden;
-  position:relative;
+  position: relative;
 }
 
-/* Canvas always fills the frame */
+/* The canvas fills the full frame */
 #gameCanvas{
   width:100%;
   height:100%;
   display:block;
   background:
-    radial-gradient(900px 700px at 25% 0%, rgba(0,242,234,.09), transparent 55%),
-    radial-gradient(900px 700px at 80% 30%, rgba(255,0,80,.10), transparent 55%),
-    linear-gradient(180deg, rgba(0,0,0,.12), rgba(0,0,0,.35));
+    radial-gradient(900px 700px at 20% 0%, rgba(0,242,234,.10), transparent 55%),
+    radial-gradient(900px 700px at 80% 25%, rgba(255,0,80,.10), transparent 55%),
+    linear-gradient(180deg, rgba(0,0,0,.12), rgba(0,0,0,.36));
 }
 
-/* ===============================
+/* =========================================================
    HUD
-   =============================== */
+   ========================================================= */
 
 .hud{
   position:absolute;
   inset: 0 0 auto 0;
   padding: 12px 12px 10px;
   display:flex;
-  align-items:flex-start;
   justify-content:space-between;
+  align-items:flex-start;
   gap: 10px;
   pointer-events:none;
-  background: linear-gradient(180deg, rgba(0,0,0,.44), rgba(0,0,0,.14), transparent);
+  background: linear-gradient(180deg, rgba(0,0,0,.48), rgba(0,0,0,.12), transparent);
 }
 
 .hudLeft{
@@ -119,7 +131,7 @@ body{
 
 .hudTitle{
   font-size: 18px;
-  font-weight: 900;
+  font-weight: 950;
   letter-spacing: .2px;
   text-shadow: 0 8px 18px rgba(0,0,0,.55);
 }
@@ -138,72 +150,30 @@ body{
 }
 
 .hudStat{
+  display:inline-flex;
+  gap: 8px;
+  align-items:center;
   font-size: 12px;
-  color: rgba(255,255,255,.86);
-  background: rgba(0,0,0,.22);
-  border: 1px solid rgba(255,255,255,.10);
-  border-radius: 999px;
   padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0,0,0,.22);
+  border: 1px solid rgba(255,255,255,.12);
   box-shadow: 0 10px 22px rgba(0,0,0,.30);
 }
 
-.hudStat .k{
-  color: rgba(255,255,255,.70);
-  margin-right: 8px;
-}
-.hudStat .v{
-  font-weight: 800;
-}
+.hudStat .k{ color: rgba(255,255,255,.70); }
+.hudStat .v{ font-weight: 900; }
 
-/* ===============================
-   Center toast (big moment callouts)
-   =============================== */
-
-.centerToast{
-  position:absolute;
-  left: 50%;
-  top: 52%;
-  transform: translate(-50%, -50%);
-  min-width: 60%;
-  max-width: 92%;
-  text-align:center;
-  padding: 12px 14px;
-  border-radius: 18px;
-  background: rgba(0,0,0,.30);
-  border: 1px solid rgba(255,255,255,.12);
-  box-shadow: 0 16px 40px rgba(0,0,0,.38);
-  opacity: 0;
-  pointer-events:none;
-  transition: opacity .18s ease, transform .18s ease;
-}
-
-.centerToast.show{
-  opacity: 1;
-  transform: translate(-50%, -50%) scale(1.02);
-}
-
-.centerToast .big{
-  font-size: 20px;
-  font-weight: 950;
-  letter-spacing: .2px;
-  margin: 0;
-}
-.centerToast .small{
-  margin-top: 6px;
-  font-size: 13px;
-  color: var(--muted);
-}
-
-/* ===============================
-   Flags (right side pop-outs)
-   =============================== */
+/* =========================================================
+   FLAGS (right-side popouts)
+   (Game.js may use this, so keep it minimal and safe)
+   ========================================================= */
 
 .flags{
   position:absolute;
-  top: 68px;
+  top: 66px;
   right: 10px;
-  width: 46%;
-  max-width: 330px;
+  width: min(46%, 330px);
   display:flex;
   flex-direction:column;
   gap: 10px;
@@ -211,26 +181,21 @@ body{
 }
 
 .flag{
+  position: relative;
   display:flex;
-  align-items:center;
   gap: 10px;
+  align-items:center;
   padding: 10px 10px;
   border-radius: 16px;
   background: rgba(0,0,0,.26);
   border: 1px solid rgba(255,255,255,.12);
   box-shadow: 0 14px 34px rgba(0,0,0,.35);
+  overflow:hidden;
+
   transform: translateX(16px);
   opacity: 0;
   animation: flagIn .22s ease forwards, flagOut .22s ease forwards;
-  animation-delay: 0s, 3.2s;
-  overflow:hidden;
-}
-
-@keyframes flagIn{
-  to{ transform: translateX(0); opacity: 1; }
-}
-@keyframes flagOut{
-  to{ transform: translateX(10px); opacity: 0; }
+  animation-delay: 0s, 3.0s;
 }
 
 .flag::before{
@@ -242,6 +207,9 @@ body{
   pointer-events:none;
 }
 
+@keyframes flagIn{ to{ transform: translateX(0); opacity: 1; } }
+@keyframes flagOut{ to{ transform: translateX(10px); opacity: 0; } }
+
 .flagPfp{
   width: 38px;
   height: 38px;
@@ -251,16 +219,15 @@ body{
   overflow:hidden;
   flex: 0 0 auto;
 }
-
 .flagPfp img{
   width:100%;
   height:100%;
-  object-fit:cover;
   display:block;
+  object-fit:cover;
 }
 
 .flagBody{
-  min-width: 0;
+  min-width:0;
   display:flex;
   flex-direction:column;
   gap: 2px;
@@ -268,7 +235,7 @@ body{
 
 .flagWho{
   font-size: 12px;
-  font-weight: 900;
+  font-weight: 950;
   letter-spacing:.2px;
   overflow:hidden;
   white-space:nowrap;
@@ -284,37 +251,77 @@ body{
   -webkit-box-orient: vertical;
 }
 
-/* team-colored backgrounds (optional; game.js may set these) */
-.flag.red{ background: rgba(255,0,80,.20); border-color: rgba(255,0,80,.32); }
-.flag.blue{ background: rgba(0,165,255,.18); border-color: rgba(0,165,255,.30); }
-.flag.green{ background: rgba(46,229,157,.18); border-color: rgba(46,229,157,.30); }
-.flag.yellow{ background: rgba(255,204,0,.18); border-color: rgba(255,204,0,.30); }
+/* Optional team color classes (only used if game.js applies them) */
+.flag.red{ background: rgba(255,0,80,.20); border-color: rgba(255,0,80,.34); }
+.flag.blue{ background: rgba(0,165,255,.18); border-color: rgba(0,165,255,.32); }
+.flag.green{ background: rgba(46,229,157,.18); border-color: rgba(46,229,157,.32); }
+.flag.yellow{ background: rgba(255,204,0,.18); border-color: rgba(255,204,0,.32); }
 
-/* ===============================
-   Overlay (setup screen)
-   =============================== */
+/* =========================================================
+   CENTER TOAST (big moments)
+   ========================================================= */
+
+.centerToast{
+  position:absolute;
+  left:50%;
+  top:52%;
+  transform: translate(-50%, -50%);
+  width: min(92%, 520px);
+  text-align:center;
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(0,0,0,.30);
+  border: 1px solid rgba(255,255,255,.14);
+  box-shadow: 0 16px 42px rgba(0,0,0,.40);
+  opacity: 0;
+  pointer-events:none;
+  transition: opacity .18s ease, transform .18s ease;
+}
+
+.centerToast.show{
+  opacity: 1;
+  transform: translate(-50%, -50%) scale(1.02);
+}
+
+.centerToast .big{
+  margin:0;
+  font-size: 20px;
+  font-weight: 950;
+  letter-spacing: .2px;
+}
+.centerToast .small{
+  margin-top: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+/* =========================================================
+   SETUP OVERLAY (on top of game)
+   NOTE: fixed so it always covers the viewport even if host
+         wraps the game in an iframe/srcdoc container.
+   ========================================================= */
 
 .overlay{
-  position:absolute;
+  position: fixed;
   inset: 0;
   display:flex;
   align-items:flex-start;
   justify-content:center;
   padding: 12px;
-  background: linear-gradient(180deg, rgba(0,0,0,.56), rgba(0,0,0,.34));
+  background: linear-gradient(180deg, rgba(0,0,0,.62), rgba(0,0,0,.38));
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
-  z-index: 50;
+  z-index: 9999;
 }
 
 .overlay.hidden{ display:none; }
 
 .overlay-card{
   width: 100%;
-  max-width: 620px;
+  max-width: 640px;
   border-radius: 22px;
-  background: rgba(0,0,0,.32);
-  border: 1px solid rgba(255,255,255,.12);
+  background: rgba(0,0,0,.34);
+  border: 1px solid rgba(255,255,255,.14);
   box-shadow: var(--shadow);
   overflow:hidden;
 }
@@ -341,7 +348,7 @@ body{
 .oneSentence{
   margin: 10px 0 0;
   font-size: 13px;
-  color: rgba(255,255,255,.86);
+  color: rgba(255,255,255,.88);
   line-height: 1.35;
 }
 
@@ -375,11 +382,13 @@ body{
   color: var(--muted);
 }
 
-input[type="text"], input[type="number"], select{
+input[type="text"],
+input[type="number"],
+select{
   width:100%;
   padding: 10px 10px;
   border-radius: 12px;
-  border: 1px solid rgba(255,255,255,.12);
+  border: 1px solid rgba(255,255,255,.14);
   background: rgba(0,0,0,.22);
   color: var(--text);
   outline:none;
@@ -387,8 +396,9 @@ input[type="text"], input[type="number"], select{
 }
 
 input::placeholder{ color: rgba(255,255,255,.45); }
+
 input:focus, select:focus{
-  border-color: rgba(0,242,234,.40);
+  border-color: rgba(0,242,234,.45);
   box-shadow: 0 0 0 3px rgba(0,242,234,.14);
 }
 
@@ -405,7 +415,7 @@ input:focus, select:focus{
   border-radius: 14px;
   border: 1px solid rgba(255,255,255,.16);
   background: var(--btnPrimary);
-  color: rgba(255,255,255,.94);
+  color: rgba(255,255,255,.96);
   font-weight: 950;
   letter-spacing:.2px;
   cursor:pointer;
@@ -418,14 +428,13 @@ input:focus, select:focus{
 
 .statusLine{
   margin-top: 10px;
-  font-size: 12px;
-  color: rgba(255,255,255,.86);
   display:flex;
   gap: 8px;
   align-items:center;
   flex-wrap:wrap;
+  font-size: 12px;
+  color: rgba(255,255,255,.88);
 }
-
 .statusLabel{ color: var(--muted); }
 .statusText{ font-weight: 900; }
 
@@ -440,7 +449,7 @@ input:focus, select:focus{
   margin-top: 12px;
   border-radius: 16px;
   background: rgba(0,0,0,.22);
-  border: 1px solid rgba(255,255,255,.10);
+  border: 1px solid rgba(255,255,255,.12);
   padding: 10px 10px;
 }
 
@@ -458,8 +467,6 @@ input:focus, select:focus{
   padding: 5px 0;
 }
 
-.checkText{ color: rgba(255,255,255,.84); }
-
 .x, .ok{
   width: 18px;
   height: 18px;
@@ -475,13 +482,13 @@ input:focus, select:focus{
 .x{
   color: rgba(255,77,77,.95);
   background: rgba(255,77,77,.12);
-  border-color: rgba(255,77,77,.22);
+  border-color: rgba(255,77,77,.26);
 }
 
 .ok{
   color: rgba(46,229,157,.95);
   background: rgba(46,229,157,.12);
-  border-color: rgba(46,229,157,.22);
+  border-color: rgba(46,229,157,.26);
 }
 
 .checksNote{
@@ -491,53 +498,41 @@ input:focus, select:focus{
   line-height: 1.35;
 }
 
-.howto{
-  padding-top: 0;
-}
-
 .howtoTitle{
   font-size: 12px;
   font-weight: 950;
-  margin-bottom: 8px;
+  margin: 0 0 8px 0;
 }
 
 .howtoList{
   margin: 0;
   padding-left: 18px;
-  color: rgba(255,255,255,.86);
   font-size: 12px;
+  color: rgba(255,255,255,.86);
   line-height: 1.35;
 }
 
 .howtoList li{ margin: 6px 0; }
 
-/* ===============================
+/* =========================================================
    Responsive
-   =============================== */
+   ========================================================= */
 
 @media (max-width: 520px){
   #app{ padding: 6px; }
-  .gameRoot{
-    width: 96vw;
-    max-height: 96vh;
-  }
-  .flags{
-    right: 8px;
-    width: 52%;
-    max-width: 280px;
-  }
+  .gameRoot{ width: 96vw; max-height: 96vh; }
   .hudTitle{ font-size: 16px; }
-  .overlay-card{ max-width: 96vw; }
+  .flags{ right: 8px; width: min(54%, 280px); }
   .settingsGrid{ grid-template-columns: 1fr 1fr; }
+  .overlay-card{ max-width: 96vw; }
 }
 
 @media (max-height: 720px){
-  .overlay{ align-items:flex-start; }
-  .overlay-card{ max-height: 92vh; overflow:auto; }
+  .overlay-card{
+    max-height: 92vh;
+    overflow:auto;
+  }
 }
 
-/* ===============================
-   Utility
-   =============================== */
-
+/* Utility */
 .hidden{ display:none !important; }

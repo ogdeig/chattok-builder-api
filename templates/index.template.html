@@ -3,223 +3,186 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="color-scheme" content="dark" />
   <title>{{TITLE}}</title>
 
   <!--
-    CRITICAL: iframe/srcdoc + SPA base-href fix
-    Some hosts set <base href="/"> which makes "style.css" resolve to "/style.css" (404).
-    We compute a safe base href from document.referrer (preferred) and inject it BEFORE any relative URLs.
+    IMPORTANT (ChatTokGaming preview runner):
+    In iframe/srcdoc or SPA hosts, relative paths like "style.css" can incorrectly resolve to "/style.css" (site root),
+    causing 404s. We set a safe <base> derived from document.referrer (parent page URL) before loading CSS/JS.
   -->
   <script>
     (function () {
       try {
-        // In srcdoc iframes, document.referrer is usually the parent page URL.
-        var ref = document.referrer;
+        // If a base tag already exists, respect it.
+        if (document.querySelector("base")) return;
 
-        // Fallback: try parent.location if allowed (may throw in cross-origin/sandbox).
-        if (!ref) {
-          try {
-            if (window.parent && window.parent.location && window.parent.location.href) {
-              ref = window.parent.location.href;
-            }
-          } catch (e) { /* ignore */ }
+        // Prefer referrer (best for srcdoc). Fallback to parent location if same-origin.
+        var ref = document.referrer || "";
+        if (!ref && window.parent && window.parent.location) {
+          try { ref = window.parent.location.href || ""; } catch (e) {}
         }
-
-        // If we still don't have a usable ref, do nothing (local hosting will still work).
         if (!ref) return;
 
-        // Compute directory of the referrer URL.
         var u = new URL(ref);
+        // Directory of the parent page URL
         var dir = u.origin + u.pathname.replace(/[^\/]*$/, "");
-        if (!dir.endsWith("/")) dir += "/";
 
+        // Insert base before any relative links/scripts parse
         var base = document.createElement("base");
         base.href = dir;
-
-        // Insert base as FIRST element in <head> to affect subsequent relative loads.
-        var head = document.head || document.getElementsByTagName("head")[0];
-        head.insertBefore(base, head.firstChild);
+        document.head.appendChild(base);
       } catch (e) {
-        // Never break the page if base calculation fails.
+        // If anything fails, we simply don't set base.
       }
     })();
   </script>
 
-  <!-- IMPORTANT: relative to computed <base> above -->
-  <link rel="stylesheet" href="./style.css" />
+  <link rel="stylesheet" href="style.css" />
 </head>
 
 <body>
   <div id="app">
 
     <!-- ===============================
-         START / SETUP OVERLAY
+         SETUP / START OVERLAY
          =============================== -->
     <div id="setupOverlay" class="overlay">
       <div class="overlay-card">
-        <h1 class="title">{{TITLE}}</h1>
-        <p class="subtitle">{{SUBTITLE}}</p>
+        <header class="overlay-head">
+          <h1 class="title">{{TITLE}}</h1>
+          <div class="subtitle">{{SUBTITLE}}</div>
+          <p class="oneSentence">{{ONE_SENTENCE}}</p>
+        </header>
 
-        <div class="form-grid" id="setupFields">
-
-          <label class="field field-span">
-            <span class="field-label">TikTok LIVE ID (username only)</span>
-            <input
-              id="liveIdInput"
-              type="text"
-              placeholder="username (without @)"
-              autocomplete="off"
-              autocapitalize="none"
-              spellcheck="false"
-            />
-          </label>
-
-          <!-- Server injects additional settings fields here (NO duplicate LIVE ID field). -->
-          {{SETTINGS_FIELDS_HTML}}
-
-        </div>
-
-        <button id="startGameBtn" class="primary-btn">Connect &amp; Start Game</button>
-
-        <p id="statusText" class="status-line">Waiting for platform scripts…</p>
-
-        <div class="hint">
-          <div class="hint-title">How to play</div>
-          <div class="hint-sub">{{ONE_SENTENCE}}</div>
-          <ul class="hint-list">{{HOW_TO_PLAY_LI}}</ul>
-          <div class="hint-sub muted">
-            Tip: if connection fails, check your LIVE ID and token injection, then retry.
+        <section class="overlay-section">
+          <div class="fieldRow">
+            <label class="field field-span">
+              <span class="field-label">TikTok LIVE ID (username only)</span>
+              <input id="liveIdInput" type="text" placeholder="username (without @)" autocomplete="off" />
+            </label>
           </div>
-        </div>
 
-        <!-- Platform checks (proto + tiktok-client.js are platform-provided) -->
-        <div class="platform-checks" aria-live="polite">
-          <div class="check-row">
-            <span class="check-icon" id="checkTikTokIcon">⏳</span>
-            <span class="check-text">
-              TikTok client
-              <span class="check-detail" id="checkTikTokText">Waiting for injection…</span>
-            </span>
+          <div class="settingsGrid" id="settingsGrid">
+            {{SETTINGS_FIELDS_HTML}}
           </div>
-          <div class="check-row">
-            <span class="check-icon" id="checkProtoIcon">⏳</span>
-            <span class="check-text">
-              proto
-              <span class="check-detail" id="checkProtoText">Waiting for injection…</span>
-            </span>
-          </div>
-        </div>
 
-        <div class="hint-sub muted" style="margin-top:10px;">
-          This game does <b>not</b> ship platform scripts. ChatTokGaming preview/live injects them.
-          If you are testing locally, you may see “Waiting for injection.”
-        </div>
+          <div class="btnRow">
+            <button id="startGameBtn" class="primaryBtn" type="button">Connect &amp; Start Game</button>
+          </div>
+
+          <div class="statusLine">
+            <span class="statusLabel">Status:</span>
+            <span id="statusText" class="statusText">Waiting for platform scripts…</span>
+          </div>
+
+          <div class="tip">
+            Tip: If connection fails, verify LIVE ID and ensure ChatTokGaming injected your token and platform scripts.
+          </div>
+
+          <div class="checks">
+            <div class="checksTitle">Platform checks</div>
+            <div class="checkItem">
+              <span id="checkTikTokClientIcon" class="x">✖</span>
+              <span class="checkText">TikTok client <span id="checkTikTokClientText">Checking…</span></span>
+            </div>
+            <div class="checkItem">
+              <span id="checkProtoIcon" class="x">✖</span>
+              <span class="checkText">proto <span id="checkProtoText">Checking…</span></span>
+            </div>
+            <div class="checksNote">
+              This game does <b>not</b> ship platform scripts (no tiktok-client.js / no proto bundle).
+              ChatTokGaming preview/live injects them.
+            </div>
+          </div>
+        </section>
+
+        <section class="overlay-section howto">
+          <div class="howtoTitle">How to play</div>
+          <ul class="howtoList">
+            {{HOW_TO_PLAY_LI}}
+          </ul>
+        </section>
       </div>
     </div>
 
     <!-- ===============================
-         GAME SCREEN (9:16 VIEWPORT)
+         GAME ROOT (9:16)
          =============================== -->
-    <div id="gameScreen" class="game-screen">
-      <div class="game-wrapper">
+    <div id="gameRoot" class="gameRoot" aria-hidden="false">
+      <div class="gameFrame">
+        <canvas id="gameCanvas" width="720" height="1280"></canvas>
 
-        <header class="topbar">
-          <div class="topbar-left">
-            <div class="game-name">{{TITLE}}</div>
-            <div class="game-sub">{{SUBTITLE}}</div>
+        <!-- HUD -->
+        <div id="hud" class="hud">
+          <div class="hudLeft">
+            <div class="hudTitle">{{TITLE}}</div>
+            <div class="hudSub">{{SUBTITLE}}</div>
           </div>
-          <div class="topbar-right">
-            <span class="pill">Status: <span id="statusTextInGame" class="status-text">Disconnected</span></span>
+          <div class="hudRight">
+            <div class="hudStat"><span class="k">Connection</span> <span id="statusTextInGame" class="v">Disconnected</span></div>
+            <div class="hudStat"><span class="k">Live Events</span> <span class="v">Chat / likes / gifts</span></div>
           </div>
-        </header>
+        </div>
 
-        <main class="layout">
-          <section class="main">
-            <div class="viewport">
-              <div class="safe-top"></div>
-              <div id="gameRoot" class="game-root">
-                <!-- game.js renders here -->
-              </div>
-              <div class="safe-bottom"></div>
-            </div>
-          </section>
+        <!-- Flags / notifications -->
+        <div id="flags" class="flags" aria-live="polite" aria-atomic="false"></div>
 
-          <!-- Notifications area (game.js may or may not use this depending on the plan/spec) -->
-          <aside class="side">
-            <div class="side-card">
-              <div class="side-title">Notifications</div>
-              <div id="flags" class="flags"></div>
-              <div class="side-foot">Chat / likes / gifts can appear here (if used by this game).</div>
-            </div>
-          </aside>
-        </main>
-
-        <footer class="footer-text">
-          Connection: <span id="statusTextFooter" class="status-text">Disconnected</span>
-        </footer>
+        <!-- Center callouts -->
+        <div id="centerToast" class="centerToast" aria-live="polite"></div>
       </div>
     </div>
-
   </div>
 
-  <!--
-    PROTO CONTRACT + TIKTOK CLIENT CONTRACT
-    ✅ Do NOT load proto.bundle.js / protobuf scripts here.
-    ✅ Do NOT load tiktok-client.js here.
-    ChatTokGaming preview/live injects these platform scripts.
-    This template only loads game.js (your game logic) and checks for injection.
+  <!-- IMPORTANT:
+       - Do NOT load tiktok-client.js here (ChatTokGaming injects it).
+       - Do NOT load proto.bundle.js here (avoid 404s). We only verify presence and show status.
   -->
   <script>
     (function () {
-      function setCheck(idIcon, idText, ok, msg) {
+      function setCheck(idIcon, idText, ok, text) {
         var icon = document.getElementById(idIcon);
-        var text = document.getElementById(idText);
-        if (!icon || !text) return;
-        icon.textContent = ok ? "✅" : "❌";
-        text.textContent = msg;
+        var label = document.getElementById(idText);
+        if (!icon || !label) return;
+
+        icon.className = ok ? "ok" : "x";
+        icon.textContent = ok ? "✔" : "✖";
+        label.textContent = text;
       }
 
-      function updateChecks() {
-        var hasTikTokClient = (typeof TikTokClient !== "undefined");
-        var hasProto = (typeof proto !== "undefined") || (typeof window !== "undefined" && typeof window.proto !== "undefined");
+      function runChecks() {
+        var hasClient = (typeof window.TikTokClient !== "undefined");
+        var hasProto = (typeof window.proto !== "undefined");
 
-        if (hasTikTokClient) {
-          setCheck("checkTikTokIcon", "checkTikTokText", true, "Injected");
-        } else {
-          setCheck("checkTikTokIcon", "checkTikTokText", false, "Missing (platform must inject tiktok-client.js)");
-        }
+        setCheck(
+          "checkTikTokClientIcon",
+          "checkTikTokClientText",
+          hasClient,
+          hasClient ? "OK (injected)" : "Missing (platform must inject tiktok-client.js)"
+        );
 
-        if (hasProto) {
-          setCheck("checkProtoIcon", "checkProtoText", true, "Injected");
-        } else {
-          setCheck("checkProtoIcon", "checkProtoText", false, "Missing (platform must inject proto bundle)");
-        }
+        setCheck(
+          "checkProtoIcon",
+          "checkProtoText",
+          hasProto,
+          hasProto ? "OK (injected)" : "Missing (platform must inject proto bundle)"
+        );
 
-        // Friendly status line on overlay
+        // Only update the status line if the game hasn't taken over statusText yet.
         var st = document.getElementById("statusText");
-        if (st) {
-          if (!hasTikTokClient && !hasProto) st.textContent = "Waiting for platform scripts…";
-          else if (!hasTikTokClient) st.textContent = "TikTok client missing (platform injection required).";
-          else if (!hasProto) st.textContent = "proto missing (platform injection required).";
-          else st.textContent = "Ready. Enter LIVE ID and press Connect.";
+        if (st && (st.textContent || "").toLowerCase().includes("waiting")) {
+          if (hasClient && hasProto) st.textContent = "Ready. Enter LIVE ID and press Connect & Start Game.";
+          else st.textContent = "Waiting for injection… (works in ChatTokGaming preview/live)";
         }
       }
 
-      updateChecks();
-      // Re-check a few times during boot (platform may inject after initial paint).
-      var tries = 0;
-      var t = setInterval(function () {
-        tries++;
-        updateChecks();
-        var okTikTok = (typeof TikTokClient !== "undefined");
-        var okProto = (typeof proto !== "undefined") || (typeof window !== "undefined" && typeof window.proto !== "undefined");
-        if ((okTikTok && okProto) || tries >= 20) clearInterval(t);
-      }, 350);
+      // Check a couple times—some hosts inject scripts after first paint.
+      runChecks();
+      setTimeout(runChecks, 1200);
+      setTimeout(runChecks, 3500);
     })();
   </script>
 
-  <!-- IMPORTANT: only load the game logic (paths fixed by <base> script above) -->
-  <script defer src="./game.js"></script>
+  <!-- Your game logic -->
+  <script src="game.js"></script>
 </body>
 </html>

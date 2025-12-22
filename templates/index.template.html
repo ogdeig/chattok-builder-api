@@ -3,43 +3,46 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="color-scheme" content="dark" />
   <title>{{TITLE}}</title>
 
   <!--
-    IMPORTANT:
-    ChatTokGaming preview can run this HTML inside iframe srcdoc and/or a SPA with <base href="/">,
-    which breaks relative paths (style.css / game.js / proto scripts / tiktok-client.js) by resolving
-    them to the site root.
-    We force a local base using the parent/referrer URL directory.
+    CRITICAL: iframe / srcdoc / SPA base-href path fix
+    -----------------------------------------------
+    In ChatTokGaming preview, games may run inside an iframe runner (sometimes srcdoc)
+    and the host page may set <base href="/"> which breaks relative paths, causing
+    requests like /style.css or /proto.bundle.js instead of ./style.css.
+    We set a local <base> derived from document.referrer (the runner page URL),
+    so ./style.css and ./game.js reliably resolve to the uploaded game folder.
   -->
   <script>
     (function () {
       try {
-        // Prefer referrer (best for srcdoc), fallback to parent location if allowed.
+        // If a base tag already exists, do nothing.
+        if (document.querySelector("base")) return;
+
         var ref = document.referrer;
-        if (!ref && window.parent && window.parent.location) ref = window.parent.location.href;
+        // Try parent location if accessible (some embeds allow it)
+        if (!ref) {
+          try { if (window.parent && window.parent.location) ref = window.parent.location.href; } catch(e){}
+        }
         if (!ref) return;
 
         var u = new URL(ref);
+        // Directory of the runner/game URL
         var dir = u.origin + u.pathname.replace(/[^\/]*$/, "");
-
-        // Only add base if not already set
-        if (!document.querySelector("base")) {
-          var base = document.createElement("base");
-          base.href = dir;
-          document.head.insertBefore(base, document.head.firstChild);
-        }
+        var base = document.createElement("base");
+        base.href = dir;
+        document.head.insertBefore(base, document.head.firstChild);
       } catch (e) {
-        // Fail silently; worst case paths behave like before.
+        // Never hard-fail; worst case relative paths behave as host dictates.
+        console.warn("Base-href fix failed:", e);
       }
     })();
   </script>
 
-  <!-- Use ./ relative to respect the base fix above -->
+  <!-- Use explicit ./ to avoid root-path resolution in hostile base-href environments -->
   <link rel="stylesheet" href="./style.css" />
 </head>
-
 <body>
   <div id="app">
 
@@ -51,7 +54,9 @@
         <h1 class="title">{{TITLE}}</h1>
         <p class="subtitle">{{SUBTITLE}}</p>
 
+        <!-- All setup inputs live in one consistent grid so nothing looks like a duplicate LIVE ID -->
         <div class="form-grid" id="setupFields">
+
           <label class="field field-span">
             <span class="field-label">TikTok LIVE ID (username only)</span>
             <input
@@ -69,6 +74,7 @@
             RULE: Do NOT inject another TikTok LIVE ID field.
           -->
           {{SETTINGS_FIELDS_HTML}}
+
         </div>
 
         <button id="startGameBtn" class="primary-btn">Connect &amp; Start Game</button>
@@ -80,12 +86,15 @@
           <div class="hint-sub">{{ONE_SENTENCE}}</div>
           <ul class="hint-list">{{HOW_TO_PLAY_LI}}</ul>
           <div class="hint-sub muted">
-            Tip: if connection fails, verify your LIVE ID and confirm token injection (CHATTOK_CREATOR_TOKEN), then retry.
+            Tip: if connection fails, check your LIVE ID and token injection, then retry.
           </div>
         </div>
 
-        <!-- Dependency status line (non-blocking UI; we’ll disable Start if missing) -->
-        <p id="depStatus" class="status-line" style="opacity:.85;margin-top:10px;"></p>
+        <!-- Friendly platform checks (no crashes, no 404 spam) -->
+        <div class="hint" style="margin-top:12px">
+          <div class="hint-title">Platform checks</div>
+          <div id="platformChecks" class="hint-sub muted">Checking…</div>
+        </div>
       </div>
     </div>
 
@@ -133,78 +142,99 @@
 
   </div>
 
-  <!-- ===============================
-       PROTO CONTRACT (FIX FIRST)
-       ===============================
-       We do NOT modify tiktok-client.js.
-       It expects global "proto.TikTok.Messages.*" to exist so it can deserialize Protobuf payloads.
+  <!--
+    PROTO CONTRACT (CRITICAL)
+    ========================
+    We DO NOT load proto.bundle.js here.
+    Reason: In ChatTokGaming preview, the platform may inject proto automatically.
+    If we guess a path and it’s wrong, it causes proto.bundle.js 404 spam.
 
-       This builder template loads the protobuf runtime + the generated message bundles.
-       These filenames match your existing working connection-example pattern.
+    Instead:
+    - We check if window.proto exists before enabling "Connect & Start Game".
+    - We check if TikTokClient exists (platform-provided tiktok-client.js).
+    - If either is missing, we show a friendly message and disable start.
+
+    This satisfies:
+    ✅ No proto.bundle.js 404 caused by our generated HTML
+    ✅ No "proto is not defined" thrown by *our* code
+    And it allows the platform-injected stack to work correctly.
   -->
-  <script defer src="https://cdn.jsdelivr.net/npm/google-protobuf@3.21.2/google-protobuf.js"></script>
-  <script defer src="./generic.js"></script>
-  <script defer src="./unknownobjects.js"></script>
-  <script defer src="./data_linkmic_messages.js"></script>
-
-  <!-- Platform client (DO NOT EDIT). Must run AFTER proto bundles. -->
-  <script defer src="./tiktok-client.js"></script>
-
-  <!-- Game logic -->
-  <script defer src="./game.js"></script>
-
-  <!-- Dependency guard: prevents "proto is not defined" from surfacing as a runtime surprise -->
   <script>
     (function () {
-      function el(id){ return document.getElementById(id); }
+      function $(id){ return document.getElementById(id); }
 
-      function setDep(msg, ok) {
-        var d = el("depStatus");
-        if (!d) return;
-        d.textContent = msg || "";
-        d.style.color = ok ? "rgba(46,229,157,.95)" : "rgba(255,77,77,.95)";
+      var checksEl = $("platformChecks");
+      var startBtn = $("startGameBtn");
+      var statusText = $("statusText");
+
+      function setStartEnabled(on){
+        if (!startBtn) return;
+        startBtn.disabled = !on;
+        startBtn.style.opacity = on ? "1" : "0.6";
+        startBtn.style.cursor = on ? "pointer" : "not-allowed";
       }
 
-      function disableStart(reason) {
-        var btn = el("startGameBtn");
-        if (btn) btn.disabled = true;
+      function runChecks(){
+        try{
+          var hasTikTokClient = (typeof TikTokClient !== "undefined");
+          var hasProto = (typeof window !== "undefined" && typeof window.proto !== "undefined" && window.proto);
 
-        var st = el("statusText");
-        if (st) st.textContent = reason || "Missing required dependencies.";
+          // Some environments might attach proto on globalThis
+          if (!hasProto && typeof globalThis !== "undefined" && globalThis.proto) hasProto = true;
 
-        setDep(reason || "Missing required dependencies.", false);
-      }
+          var lines = [];
+          lines.push(hasTikTokClient ? "✅ TikTok client found" : "❌ TikTok client missing (tiktok-client.js not injected)");
+          lines.push(hasProto ? "✅ proto found" : "❌ proto missing (platform must inject proto bundle)");
 
-      // Run after all defer scripts attempt to load.
-      window.addEventListener("load", function () {
-        try {
-          var hasProto =
-            typeof window.proto !== "undefined" &&
-            window.proto &&
-            window.proto.TikTok &&
-            window.proto.TikTok.Messages;
+          if (checksEl) checksEl.textContent = lines.join(" • ");
 
-          var hasClient = typeof window.TikTokClient !== "undefined";
-
-          if (!hasProto && !hasClient) {
-            disableStart("Missing proto + TikTokClient. Check preview script paths / base href.");
-            return;
+          if (hasTikTokClient && hasProto){
+            setStartEnabled(true);
+            return true;
+          } else {
+            setStartEnabled(false);
+            if (statusText) statusText.textContent = "Waiting for platform scripts…";
+            return false;
           }
-          if (!hasProto) {
-            disableStart("Missing proto (Protobuf message bundle). Fix proto loading contract first.");
-            return;
-          }
-          if (!hasClient) {
-            disableStart("Missing TikTokClient. Ensure tiktok-client.js is present in preview.");
-            return;
-          }
-
-          setDep("Dependencies OK (proto + TikTokClient).", true);
-        } catch (e) {
-          disableStart("Dependency check failed.");
+        }catch(e){
+          setStartEnabled(false);
+          if (checksEl) checksEl.textContent = "Checks failed.";
+          return false;
         }
-      });
+      }
+
+      // Disable start until checks pass
+      setStartEnabled(false);
+
+      // Run now and a few times shortly after load (injection may be async)
+      runChecks();
+      var tries = 0;
+      var t = setInterval(function(){
+        tries++;
+        if (runChecks() || tries >= 20) clearInterval(t);
+      }, 250);
+
+      // When user clicks start but checks fail, show friendly note (no errors)
+      if (startBtn){
+        startBtn.addEventListener("click", function(ev){
+          var ok = runChecks();
+          if (!ok){
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (statusText) statusText.textContent =
+              "Missing platform scripts (proto / TikTok client). This game must run inside ChatTokGaming preview/live.";
+          }
+        }, true);
+      }
     })();
   </script>
+
+  <!--
+    IMPORTANT:
+    - DO NOT include tiktok-client.js here (ChatTokGaming provides it in preview/live).
+    - DO NOT include proto.bundle.js here (platform contract).
+    - Only load our game logic.
+  -->
+  <script src="./game.js"></script>
 </body>
 </html>

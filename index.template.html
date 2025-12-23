@@ -1,153 +1,263 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
+  <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="color-scheme" content="dark" />
   <title>{{TITLE}}</title>
 
-  <!--
-    IMPORTANT:
-    When this HTML runs inside iframe srcdoc (about:srcdoc), relative paths can resolve
-    to the parent app base (/) depending on how the preview runner is hosted.
-    We force a local <base> using document.referrer (the parent page URL directory)
-    so that style.css and game.js resolve correctly.
-  -->
+  <!-- Minimal fallback styling (real styling comes from style.css once loaded) -->
+  <style>
+    html,body{margin:0;height:100%;background:#050b17;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+    #app{min-height:100%;display:flex}
+    .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;padding:18px;background:rgba(0,0,0,.55);backdrop-filter: blur(10px);z-index:50}
+    .overlay-card{width:min(560px,92vw);border-radius:18px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.10);box-shadow:0 18px 60px rgba(0,0,0,.55);padding:16px 16px 14px}
+    .h1{font-size:30px;line-height:1.1;margin:0 0 6px}
+    .muted{opacity:.78;font-size:13px}
+    .row{display:flex;gap:10px;flex-wrap:wrap}
+    .field{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+    .field-label{font-size:12px;opacity:.8}
+    input,button,select{font:inherit}
+    input[type="text"], input[type="number"]{width:100%;padding:10px 11px;border-radius:12px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.06);color:#fff;outline:none}
+    button{cursor:pointer;border-radius:12px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.09);color:#fff;padding:11px 12px;font-weight:700}
+    button:disabled{opacity:.55;cursor:not-allowed}
+    .checks{margin-top:10px;border-top:1px solid rgba(255,255,255,.10);padding-top:10px}
+    .checkLine{display:flex;align-items:center;gap:8px;font-size:12.5px;margin:6px 0;opacity:.9}
+    .dot{width:10px;height:10px;border-radius:99px;background:#ff4d4d;box-shadow:0 0 0 3px rgba(255,77,77,.18)}
+    .dot.ok{background:#2ee59d;box-shadow:0 0 0 3px rgba(46,229,157,.18)}
+    .hint{margin-top:8px;font-size:12px;opacity:.75;line-height:1.35}
+  </style>
+
+  <!-- =========================================================
+       Injection bridge + robust asset loader
+       - DO NOT load tiktok-client.js here (platform injects it)
+       - DO NOT load proto.bundle.js here (avoid 404; platform injects proto)
+       - If injected into parent/top, we bridge into this frame.
+       - We dynamically load style.css + game.js using a computed base dir
+         to avoid /style.css and /game.js root-404 problems.
+  ========================================================== -->
   <script>
     (function () {
+      function safeAssign(name, val) {
+        try {
+          if (typeof window[name] === "undefined" && typeof val !== "undefined") window[name] = val;
+        } catch (e) {}
+      }
+
+      // Bridge platform-injected globals from parent/top into iframe if needed
       try {
-        var ref = document.referrer;
-        if (!ref && window.parent && window.parent.location) ref = window.parent.location.href;
-        if (!ref) return;
+        if (window.parent && window.parent !== window) {
+          safeAssign("proto", window.parent.proto);
+          safeAssign("TikTokClient", window.parent.TikTokClient);
+          safeAssign("CHATTOK_CREATOR_TOKEN", window.parent.CHATTOK_CREATOR_TOKEN);
+        }
+        if (window.top && window.top !== window) {
+          safeAssign("proto", window.top.proto);
+          safeAssign("TikTokClient", window.top.TikTokClient);
+          safeAssign("CHATTOK_CREATOR_TOKEN", window.top.CHATTOK_CREATOR_TOKEN);
+        }
+      } catch (e) {}
 
-        var u = new URL(ref);
-        var dir = u.origin + u.pathname.replace(/[^\/]*$/, "");
+      // Compute a "best guess" base dir for assets (works in srcdoc/base-href hosts)
+      function computeBaseDir() {
+        try {
+          var href = (window.location && window.location.href) ? window.location.href : "";
+          if (!href || href.indexOf("about:") === 0) {
+            href = document.referrer || (window.parent && window.parent.location && window.parent.location.href) || "";
+          }
+          if (!href) return "";
+          var u = new URL(href);
+          return u.origin + u.pathname.replace(/[^\/]*$/, "");
+        } catch (e) {
+          return "";
+        }
+      }
 
-        var base = document.createElement("base");
-        base.href = dir;
-        document.head.appendChild(base);
-      } catch {}
+      window.__CHATTOK_BASEDIR__ = computeBaseDir();
     })();
   </script>
 
-  <link rel="stylesheet" href="style.css" />
+  <script>
+    (function () {
+      function addCss(href) {
+        return new Promise(function (resolve) {
+          var link = document.createElement("link");
+          link.rel = "stylesheet";
+          link.href = href;
+          link.onload = function () { resolve(true); };
+          link.onerror = function () { resolve(false); };
+          document.head.appendChild(link);
+        });
+      }
+
+      function addJs(src) {
+        return new Promise(function (resolve) {
+          var s = document.createElement("script");
+          s.src = src;
+          s.defer = true;
+          s.onload = function () { resolve(true); };
+          s.onerror = function () { resolve(false); };
+          document.body.appendChild(s);
+        });
+      }
+
+      async function loadAssets() {
+        var base = window.__CHATTOK_BASEDIR__ || "";
+        // Try multiple candidates without relying on <base href> parsing rules.
+        var cssCandidates = [];
+        var jsCandidates = [];
+
+        if (base) {
+          cssCandidates.push(base + "style.css");
+          jsCandidates.push(base + "game.js");
+        }
+        cssCandidates.push("style.css");
+        jsCandidates.push("game.js");
+
+        var cssOk = false;
+        for (var i = 0; i < cssCandidates.length; i++) {
+          cssOk = await addCss(cssCandidates[i]);
+          if (cssOk) break;
+        }
+
+        var jsOk = false;
+        for (var j = 0; j < jsCandidates.length; j++) {
+          jsOk = await addJs(jsCandidates[j]);
+          if (jsOk) break;
+        }
+
+        var st = document.getElementById("statusText");
+        if (st && !jsOk) {
+          st.textContent = "Status: Failed to load game.js (path/base issue).";
+        }
+      }
+
+      function whenReady(fn) {
+        if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", fn);
+        else fn();
+      }
+
+      whenReady(loadAssets);
+    })();
+  </script>
 </head>
 
 <body>
   <div id="app">
-    <div id="gameScreen" class="game-screen">
 
-      <!-- CONNECT / SETTINGS OVERLAY -->
-      <div id="setupOverlay" class="overlay">
-        <div class="overlay-card">
-          <div class="title">{{TITLE}}</div>
-          <div class="subtitle">{{ONE_SENTENCE}}</div>
+    <!-- ===============================
+         START / SETUP OVERLAY
+         =============================== -->
+    <div id="setupOverlay" class="overlay">
+      <div class="overlay-card">
+        <h1 class="h1">{{TITLE}}</h1>
+        <div class="muted">{{SUBTITLE}}</div>
 
-          <div class="hint" style="margin-top:10px">
-            <div class="hint-title">What will happen</div>
-            <div class="hint-sub">{{SUBTITLE}}</div>
-            <ul class="hint-list">
-              {{HOW_TO_PLAY_LI}}
-            </ul>
-            <div class="hint-sub muted" style="margin-top:8px">
-              If TikTok connection libraries are injected by ChatTokGaming, the game will connect.
-              If you’re viewing elsewhere, the game still runs in offline demo mode (no blank screen).
-            </div>
+        <div style="margin-top:10px;line-height:1.35">
+          <div style="font-weight:700;margin-bottom:4px">{{ONE_SENTENCE}}</div>
+          <div class="muted">{{BUILD_SUMMARY}}</div>
+        </div>
+
+        <div class="row" style="margin-top:12px">
+          <label class="field" style="flex:1;min-width:240px">
+            <span class="field-label">TikTok LIVE ID (username only)</span>
+            <input id="liveIdInput" type="text" placeholder="username (without @)" autocomplete="off" />
+          </label>
+
+          <!-- Server injects settings fields here -->
+          <div style="flex:1;min-width:240px">
+            {{SETTINGS_FIELDS_HTML}}
           </div>
+        </div>
 
-          <div class="form-grid" style="margin-top:12px">
-            <label class="field">
-              <span class="field-label">TikTok LIVE ID</span>
-              <input id="liveIdInput" type="text" placeholder="Example: huntbreaks" autocomplete="off" />
-            </label>
+        <div class="row" style="margin-top:8px;align-items:center;justify-content:space-between">
+          <button id="startGameBtn" type="button">Connect &amp; Start Game</button>
+          <div id="statusText" class="muted" style="text-align:right;max-width:260px">Status: Waiting…</div>
+        </div>
 
-            <!-- Settings grid read by game.js -->
-            <div id="settingsGrid" class="settings-grid">
-              <!-- Common command settings (safe defaults; game can ignore if not needed) -->
-              <label class="field">
-                <span class="field-label">Join Command</span>
-                <input id="joinCommand" data-setting-key="joinCommand" type="text" value="!join" autocomplete="off" />
-                <span class="field-hint">Chat “!join” adds a player (offline-safe).</span>
-              </label>
+        <div style="margin-top:12px">
+          <div style="font-weight:800;margin-bottom:6px">How to play</div>
+          <ul style="margin:0;padding-left:18px;line-height:1.5">
+            {{HOW_TO_PLAY_LI}}
+          </ul>
+          <div class="hint">
+            Tip: If connection fails, double-check LIVE ID + token injection. In ChatTokGaming preview/live, platform scripts are injected.
+            If you’re testing locally, you may see “Waiting for injection.”
+          </div>
+        </div>
 
-              <label class="field">
-                <span class="field-label">Action Command</span>
-                <input id="actionCommand" data-setting-key="actionCommand" type="text" value="!boost" autocomplete="off" />
-                <span class="field-hint">Chat “!boost” triggers a small power effect.</span>
-              </label>
-
-              <label class="field checkbox-row">
-                <input id="allowShareForAction" data-setting-key="allowShareForAction" type="checkbox" />
-                <span class="field-label-inline">Allow SHARE to count as Action</span>
-              </label>
-
-              <!-- Injected by server (additional settings as needed) -->
-              {{SETTINGS_FIELDS_HTML}}
-            </div>
-
-            <button id="startGameBtn" class="primary-btn" type="button">
-              Start & Connect
-            </button>
-
-            <div class="status-line">
-              <span id="statusText">Enter your LIVE ID, then press Start.</span>
-            </div>
+        <div class="checks">
+          <div class="checkLine">
+            <span id="ttDot" class="dot"></span>
+            <span id="ttText">TikTok client: waiting…</span>
+          </div>
+          <div class="checkLine">
+            <span id="pDot" class="dot"></span>
+            <span id="pText">proto: waiting…</span>
+          </div>
+          <div class="hint">
+            This game does not ship platform scripts. ChatTokGaming preview/live injects them.
+            If the platform injects scripts into the parent frame, this page auto-bridges them into the game iframe.
           </div>
         </div>
       </div>
+    </div>
 
-      <!-- MAIN GAME UI -->
-      <div class="game-wrapper">
-        <div class="topbar">
-          <div>
-            <div class="game-name">{{TITLE}}</div>
-            <div class="game-sub">{{SUBTITLE}}</div>
-          </div>
-          <div class="pill">
-            <span class="status-text" id="statusTextInGame">Disconnected</span>
-          </div>
-        </div>
+    <!-- ===============================
+         GAME ROOT
+         =============================== -->
+    <div id="gameRoot" style="width:100%;min-height:100vh;display:flex;align-items:stretch;justify-content:center;">
+      <!-- game.template.js renders the real UI inside this -->
+      <div id="gameScreen" style="width:min(540px,100vw);min-height:100vh;"></div>
 
-        <div class="layout">
-          <div class="main">
-            <div class="viewport">
-              <div class="safe-top"></div>
+      <!-- Right-side flags container (only used if the game uses flags) -->
+      <div id="flags" aria-live="polite"></div>
+    </div>
 
-              <!-- game root + canvas required by game.template.js -->
-              <div id="gameRoot" class="game-root">
-                <canvas id="gameCanvas" aria-label="Game Canvas"></canvas>
-
-                <!-- center toast overlay -->
-                <div id="centerToast" class="center-toast" aria-live="polite"></div>
-              </div>
-
-              <div class="safe-bottom"></div>
-            </div>
-          </div>
-
-          <!-- Notifications area (game.js can hide if not used) -->
-          <div class="side">
-            <div class="side-card">
-              <div id="flags" class="flags"></div>
-            </div>
-          </div>
-        </div>
-
-        <div class="footer-text">
-          Powered by ChatTok • Live interactions drive the action
-        </div>
-      </div>
-
+    <div id="statusTextInGame" style="position:fixed;left:10px;bottom:10px;font-size:12px;opacity:.8;z-index:2">
+      Disconnected
     </div>
   </div>
 
-  <!--
-    IMPORTANT CONTRACT:
-    - Do NOT load proto.bundle.js here.
-    - Do NOT load tiktok-client.js here.
-    ChatTokGaming preview/live injects those platform libs when applicable.
-    This template always loads game.js; game.js will connect if TikTokClient + proto exist.
-  -->
-  <script src="game.js"></script>
+  <!-- Lightweight platform check loop (no network requests, no 404s) -->
+  <script>
+    (function () {
+      var startedAt = Date.now();
+      function setLine(dotId, textId, ok, label) {
+        var dot = document.getElementById(dotId);
+        var text = document.getElementById(textId);
+        if (!dot || !text) return;
+        dot.className = ok ? "dot ok" : "dot";
+        text.textContent = label;
+      }
+
+      function bridgeAgain() {
+        try {
+          if (typeof window.proto === "undefined" && window.parent && window.parent.proto) window.proto = window.parent.proto;
+          if (typeof window.TikTokClient === "undefined" && window.parent && window.parent.TikTokClient) window.TikTokClient = window.parent.TikTokClient;
+          if (typeof window.CHATTOK_CREATOR_TOKEN === "undefined" && window.parent && window.parent.CHATTOK_CREATOR_TOKEN) window.CHATTOK_CREATOR_TOKEN = window.parent.CHATTOK_CREATOR_TOKEN;
+
+          if (typeof window.proto === "undefined" && window.top && window.top.proto) window.proto = window.top.proto;
+          if (typeof window.TikTokClient === "undefined" && window.top && window.top.TikTokClient) window.TikTokClient = window.top.TikTokClient;
+          if (typeof window.CHATTOK_CREATOR_TOKEN === "undefined" && window.top && window.top.CHATTOK_CREATOR_TOKEN) window.CHATTOK_CREATOR_TOKEN = window.top.CHATTOK_CREATOR_TOKEN;
+        } catch (e) {}
+      }
+
+      function tick() {
+        bridgeAgain();
+
+        var hasTT = (typeof window.TikTokClient !== "undefined");
+        var hasProto = (typeof window.proto !== "undefined");
+
+        setLine("ttDot", "ttText", hasTT, hasTT ? "TikTok client: injected ✅" : "TikTok client: missing (platform must inject tiktok-client.js)");
+        setLine("pDot", "pText", hasProto, hasProto ? "proto: injected ✅" : "proto: missing (platform must inject proto bundle)");
+
+        // Stop after 12 seconds (keeps console quiet)
+        if (Date.now() - startedAt > 12000) clearInterval(timer);
+      }
+
+      var timer = setInterval(tick, 400);
+      tick();
+    })();
+  </script>
 </body>
 </html>

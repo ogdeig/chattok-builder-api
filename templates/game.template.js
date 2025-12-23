@@ -5,7 +5,7 @@
    ✅ Do NOT request proto.bundle.js (prevents 404)
    ✅ Never hard-crashes if platform scripts aren’t injected yet
    ✅ Includes REQUIRED AI_REGION markers (server injects ONLY inside)
-   ✅ Includes your WORKING TikTok connection example (DO NOT REMOVE)
+   ✅ Includes your WORKING TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
    ========================================================= */
 
 /* Injected by API (must be replaced with valid JSON at generation time) */
@@ -76,7 +76,6 @@ function showCenterToast(big, small, ms){
    Notifications contract
    - Some games may not want “flags”.
    - Supported: "flags" (default), "toast", "off"
-   - Spec may set: SPEC.ui.notificationsStyle
 ========================================================= */
 function getNotificationsStyle(){
   const fromSpec =
@@ -86,20 +85,17 @@ function getNotificationsStyle(){
   const s = lower(norm(fromSpec));
   if (s === "off" || s === "none") return "off";
   if (s === "toast") return "toast";
-  return "flags"; // default
+  return "flags";
 }
 
-let NOTIF_STYLE = "flags"; // set during init()
+let NOTIF_STYLE = "flags";
 
 function pushFlag({ who, msg, pfp, cls }){
-  // Respect style
   if (NOTIF_STYLE === "off") return;
   if (NOTIF_STYLE === "toast") {
     showCenterToast(who || "Viewer", msg || "", 900);
     return;
   }
-
-  // flags
   if (!flagsEl) return;
 
   const wrap = document.createElement("div");
@@ -132,7 +128,6 @@ function pushFlag({ who, msg, pfp, cls }){
 
   flagsEl.appendChild(wrap);
 
-  // Keep list small
   const kids = Array.from(flagsEl.children);
   if (kids.length > 6) {
     for (let i = 0; i < kids.length - 6; i++) {
@@ -147,12 +142,9 @@ function pushFlag({ who, msg, pfp, cls }){
 
 /* =========================================================
    Settings parsing (robust)
-   - Inputs should have data-setting-key, or id/name is used
 ========================================================= */
 function readSettings(){
   const out = Object.assign({}, (SPEC && SPEC.settingsDefaults) ? SPEC.settingsDefaults : {});
-
-  // Safe defaults for common “command + share fallback” requirement
   if (out.actionCommand === undefined) out.actionCommand = "!boost";
   if (out.allowShareForAction === undefined) out.allowShareForAction = false;
   if (out.joinCommand === undefined) out.joinCommand = "!join";
@@ -166,7 +158,6 @@ function readSettings(){
     if (!key) return;
 
     const k = key.replace(/^setting[_-]/i, "").replace(/^spec[_-]/i, "");
-
     let val;
     if (el.type === "checkbox") val = !!el.checked;
     else if (el.type === "number") val = Number(el.value);
@@ -182,23 +173,114 @@ function readSettings(){
 }
 
 /* =========================================================
-   Platform contract checks
-   - ChatTokGaming injects:
-     window.TikTokClient
-     window.proto
+   PLATFORM BRIDGE (CRITICAL FIX)
+   - In ChatTokGaming preview, injection may occur in parent/top,
+     not inside the game iframe.
+   - We safely pull TikTokClient + proto from parent/top if same-origin.
 ========================================================= */
+function tryGetFrom(win, key){
+  try {
+    if (!win) return undefined;
+    return win[key];
+  } catch {
+    return undefined;
+  }
+}
+
+function bridgePlatformGlobals(){
+  // Prefer local if already present
+  let clientCtor = (typeof window.TikTokClient !== "undefined") ? window.TikTokClient : undefined;
+  let protoObj   = (typeof window.proto !== "undefined") ? window.proto : undefined;
+
+  // Pull from parent/top if accessible (same-origin)
+  if (!clientCtor) clientCtor = tryGetFrom(window.parent, "TikTokClient") || tryGetFrom(window.top, "TikTokClient");
+  if (!protoObj)   protoObj   = tryGetFrom(window.parent, "proto")       || tryGetFrom(window.top, "proto");
+
+  // If found, mirror into local window so our code sees them.
+  // (No edits to platform scripts; we’re just referencing existing injected globals.)
+  try {
+    if (clientCtor && typeof window.TikTokClient === "undefined") window.TikTokClient = clientCtor;
+  } catch {}
+  try {
+    if (protoObj && typeof window.proto === "undefined") window.proto = protoObj;
+  } catch {}
+
+  return {
+    hasClient: !!clientCtor,
+    hasProto:  !!protoObj,
+    clientCtor,
+    protoObj
+  };
+}
+
 function platformReady(){
-  const hasClient = (typeof window.TikTokClient !== "undefined");
-  const hasProto  = (typeof window.proto !== "undefined");
-  return { hasClient, hasProto };
+  const b = bridgePlatformGlobals();
+  return { hasClient: b.hasClient, hasProto: b.hasProto };
 }
 
 /* =========================================================
-   Baseline Game: "Spark Dodger" (never blank, even offline)
+   Canvas fitting (fix black box / wrong sizing)
+   - Fit BASE_W x BASE_H (9:16) into container with letterbox.
 ========================================================= */
 const BASE_W = 720;
 const BASE_H = 1280;
 
+const VIEW = {
+  dpr: 1,
+  cw: 0,
+  ch: 0,
+  scale: 1,
+  offX: 0,
+  offY: 0,
+};
+
+function resizeCanvasToContainer(){
+  const rect = canvas.getBoundingClientRect();
+  const cw = Math.max(1, Math.floor(rect.width));
+  const ch = Math.max(1, Math.floor(rect.height));
+  const dpr = clamp((window.devicePixelRatio || 1), 1, 2);
+
+  // Avoid thrash
+  if (cw === VIEW.cw && ch === VIEW.ch && dpr === VIEW.dpr) return;
+
+  VIEW.cw = cw; VIEW.ch = ch; VIEW.dpr = dpr;
+
+  canvas.width  = Math.floor(cw * dpr);
+  canvas.height = Math.floor(ch * dpr);
+
+  const scale = Math.min(cw / BASE_W, ch / BASE_H);
+  const offX = (cw - BASE_W * scale) * 0.5;
+  const offY = (ch - BASE_H * scale) * 0.5;
+
+  VIEW.scale = scale;
+  VIEW.offX = offX;
+  VIEW.offY = offY;
+
+  // map BASE coords => pixels with letterbox offset
+  ctx2d.setTransform(dpr * scale, 0, 0, dpr * scale, dpr * offX, dpr * offY);
+}
+
+function clearFrame(){
+  // Clear full canvas in device pixels
+  ctx2d.save();
+  ctx2d.setTransform(1,0,0,1,0,0);
+  ctx2d.clearRect(0,0,canvas.width,canvas.height);
+  ctx2d.restore();
+}
+
+function pointerToBase(e){
+  const rect = canvas.getBoundingClientRect();
+  const px = (e.clientX - rect.left) - VIEW.offX;
+  const py = (e.clientY - rect.top)  - VIEW.offY;
+  return {
+    x: px / Math.max(0.0001, VIEW.scale),
+    y: py / Math.max(0.0001, VIEW.scale)
+  };
+}
+
+/* =========================================================
+   Baseline Game State (never blank, even offline)
+========================================================= */
 const G = {
   started: false,
   connected: false,
@@ -206,13 +288,13 @@ const G = {
   lastT: 0,
   time: 0,
 
-  players: new Map(), // userId -> player
+  players: new Map(),
   orbs: [],
   enemies: [],
   particles: [],
 
   score: 0,
-  pulse: 0,       // 0..100 from likes
+  pulse: 0,
   pulseReady: false,
 
   host: {
@@ -224,8 +306,6 @@ const G = {
 
   keys: new Set(),
   pointer: { down:false, x:0, y:0 },
-
-  dpr: 1,
 };
 
 function resetWorld(){
@@ -235,16 +315,6 @@ function resetWorld(){
   G.score = 0;
   G.pulse = 0;
   G.pulseReady = false;
-}
-
-function ensureDpr(){
-  const dpr = clamp((window.devicePixelRatio || 1), 1, 2);
-  if (G.dpr === dpr) return;
-
-  G.dpr = dpr;
-  canvas.width  = Math.floor(BASE_W * dpr);
-  canvas.height = Math.floor(BASE_H * dpr);
-  ctx2d.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
 function spawnOrb(x, y, boost){
@@ -297,7 +367,6 @@ function shockwave(x,y, power){
   const p = clamp(power || 1, 1, 6);
   addParticle(x,y, 18 + p*6, "aqua");
 
-  // push enemies away / damage
   for (const e of G.enemies){
     const dx = e.x - x, dy = e.y - y;
     const d = Math.hypot(dx,dy) || 1;
@@ -324,7 +393,7 @@ function upsertPlayer(user){
       dist: rand(170, 280),
       r: rand(12, 16),
       score: 0,
-      colorClass: "", // optional: "red"/"blue"/etc
+      colorClass: "",
       lastAction: 0,
     };
     G.players.set(userId, p);
@@ -375,12 +444,169 @@ function getUserFromMessage(msg){
 }
 
 /* =========================================================
-   ✅ WORKING TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
+   ✅ TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
 ========================================================= */
 
 // 7. TikTok message handling
 // ===============================
 
+function handleTeamJoin(text, user) {
+    const maybeTeam = normalizeTeamText(text);
+    if (!maybeTeam) return;
+
+    // Assign or move team.
+    userTeams.set(user.userId, maybeTeam);
+    console.log(`${user.nickname} joined team ${maybeTeam}`);
+}
+
+function handleAnswer(text, user) {
+    if (!gameStarted || gameFinished) return;
+    if (!userTeams.has(user.userId)) return; // must be on a team first
+
+    const answer = normalizeAnswerText(text);
+    if (!answer) return;
+
+    // Only allow one answer per question per user
+    if (answeredUsersThisQuestion.has(user.userId)) return;
+    answeredUsersThisQuestion.set(user.userId, true);
+
+    const team = userTeams.get(user.userId);
+    const q = getCurrentQuestion();
+    if (!q) return;
+
+    // Track participation per round
+    if (roundAnswerCounts[team] !== undefined) {
+        roundAnswerCounts[team] += 1;
+    }
+
+    if (answer === q.correct) {
+        teamScores[team]++;
+        teamRoundScores[team]++;
+        updateScoreDisplay();
+        flashCorrectAnswer(user.nickname, team, answer);
+    }
+
+    updateRoundDuelBar();
+}
+
+function onChatMessage(data) {
+    try {
+        const msg = data || {};
+        const text = getChatTextFromMessage(msg);
+        const user = getUserFromMessage(msg);
+
+        if (!text) return;
+
+        // 1) Team selection ("red" / "blue"; any case)
+        handleTeamJoin(text, user);
+
+        // 2) Answer selection ("A"/"B"/"C"/"D"; any case)
+        handleAnswer(text, user);
+    } catch (e) {
+        console.error("Error in chat handler:", e);
+    }
+}
+
+function onGiftMessage(data) {
+    try {
+        // You can optionally use gifts to boost scores, etc.
+        console.log("Gift message:", data);
+    } catch (e) {
+        console.error("Error in gift handler:", e);
+    }
+}
+
+// ===============================
+// 8. TikTok client setup / connect
+// ===============================
+
+let client = null;
+let pendingStart = false;
+
+function setupTikTokClient(liveId) {
+    if (!liveId) {
+        throw new Error("liveId is required");
+    }
+
+    if (client && client.socket) {
+        try {
+            client.socket.close();
+        } catch (e) {
+            console.warn("Error closing previous socket:", e);
+        }
+    }
+
+    // IMPORTANT: bridge platform globals (iframe-safe)
+    bridgePlatformGlobals();
+
+    if (typeof TikTokClient === "undefined") {
+        throw new Error("TikTokClient is not available. Check tiktok-client.js.");
+    }
+
+    client = new TikTokClient(liveId);
+
+    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
+    // If token is in parent/top, try to mirror it down as well.
+    try {
+      if (typeof CHATTOK_CREATOR_TOKEN === "undefined") {
+        const t = tryGetFrom(window.parent, "CHATTOK_CREATOR_TOKEN") || tryGetFrom(window.top, "CHATTOK_CREATOR_TOKEN");
+        if (t) window.CHATTOK_CREATOR_TOKEN = t;
+      }
+    } catch {}
+
+    if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
+        client.setAccessToken(CHATTOK_CREATOR_TOKEN);
+    }
+
+    client.on("connected", () => {
+        console.log("Connected to TikTok hub.");
+        G.connected = true;
+        if (statusText) statusText.textContent = "Connected to TikTok LIVE.";
+        if (statusTextInGame) statusTextInGame.textContent = "Connected.";
+
+        // Only start game once we know we're connected
+        if (pendingStart && !gameStarted) {
+            beginGame();
+        }
+    });
+
+    client.on("disconnected", (reason) => {
+        console.log("Disconnected from TikTok hub:", reason);
+        G.connected = false;
+        const msg = reason || "Connection closed";
+        if (statusText) statusText.textContent = "Disconnected: " + msg;
+        if (statusTextInGame) statusTextInGame.textContent = "Disconnected: " + msg;
+
+        if (!gameStarted) {
+            // Connection failed before game start; allow retry
+            pendingStart = false;
+        }
+    });
+
+    client.on("error", (err) => {
+        console.error("TikTok client error:", err);
+        if (statusText) statusText.textContent =
+            "Error: " + (err && err.message ? err.message : "Unknown");
+    });
+
+    client.on("chat", onChatMessage);
+    client.on("gift", onGiftMessage);
+    client.on("like", (data) => {
+        // Optionally use likes later
+        // console.log("Like message:", data);
+        try { handleTemplateLike(data || {}); } catch(e){ console.error("like handler:", e); }
+    });
+
+    // Optional events (if connector emits them)
+    client.on("join", (data) => { try { handleTemplateJoin(data || {}); } catch(e){ console.error("join handler:", e); }});
+    client.on("share", (data) => { try { handleTemplateShare(data || {}); } catch(e){ console.error("share handler:", e); }});
+
+    client.connect();
+}
+
+/* =========================================================
+   Trivia example placeholders (template-safe)
+========================================================= */
 const userTeams = new Map();
 const answeredUsersThisQuestion = new Map();
 const roundAnswerCounts = { red:0, blue:0, green:0, yellow:0 };
@@ -405,171 +631,19 @@ function normalizeAnswerText(text){
   if (t === "d" || t.includes(" d ")) return "D";
   return null;
 }
-function getCurrentQuestion(){ return null; } // Only used by trivia-style games
+function getCurrentQuestion(){ return null; }
 function updateScoreDisplay(){}
 function flashCorrectAnswer(nickname, team, answer){}
 function updateRoundDuelBar(){}
 
-function handleTeamJoin(text, user) {
-  const maybeTeam = normalizeTeamText(text);
-  if (!maybeTeam) return;
-
-  // Assign or move team.
-  userTeams.set(user.userId, maybeTeam);
-  console.log(`${user.nickname} joined team ${maybeTeam}`);
-}
-
-function handleAnswer(text, user) {
-  if (!gameStarted || gameFinished) return;
-  if (!userTeams.has(user.userId)) return; // must be on a team first
-
-  const answer = normalizeAnswerText(text);
-  if (!answer) return;
-
-  // Only allow one answer per question per user
-  if (answeredUsersThisQuestion.has(user.userId)) return;
-  answeredUsersThisQuestion.set(user.userId, true);
-
-  const team = userTeams.get(user.userId);
-  const q = getCurrentQuestion();
-  if (!q) return;
-
-  // Track participation per round
-  if (roundAnswerCounts[team] !== undefined) {
-    roundAnswerCounts[team] += 1;
-  }
-
-  if (answer === q.correct) {
-    teamScores[team]++;
-    teamRoundScores[team]++;
-    updateScoreDisplay();
-    flashCorrectAnswer(user.nickname, team, answer);
-  }
-
-  updateRoundDuelBar();
-}
-
-function onChatMessage(data) {
-  try {
-    const msg = data || {};
-    const text = getChatTextFromMessage(msg);
-    const user = getUserFromMessage(msg);
-
-    if (!text) return;
-
-    // 1) Team selection ("red" / "blue"; any case)
-    handleTeamJoin(text, user);
-
-    // 2) Answer selection ("A"/"B"/"C"/"D"; any case)
-    handleAnswer(text, user);
-
-    // 3) Template baseline: treat chat as “action” if it matches command
-    handleTemplateChatAction(text, user, msg);
-  } catch (e) {
-    console.error("Error in chat handler:", e);
-  }
-}
-
-function onGiftMessage(data) {
-  try {
-    // You can optionally use gifts to boost scores, etc.
-    console.log("Gift message:", data);
-    handleTemplateGift(data || {});
-  } catch (e) {
-    console.error("Error in gift handler:", e);
-  }
-}
-
-// ===============================
-// 8. TikTok client setup / connect
-// ===============================
-
-let client = null;
-let pendingStart = false;
-
-function setupTikTokClient(liveId) {
-  if (!liveId) {
-    throw new Error("liveId is required");
-  }
-
-  if (client && client.socket) {
-    try {
-      client.socket.close();
-    } catch (e) {
-      console.warn("Error closing previous socket:", e);
-    }
-  }
-
-  if (typeof TikTokClient === "undefined") {
-    throw new Error("TikTokClient is not available. Check tiktok-client.js.");
-  }
-
-  client = new TikTokClient(liveId);
-
-  // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
-  if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
-    client.setAccessToken(CHATTOK_CREATOR_TOKEN);
-  }
-
-  client.on("connected", () => {
-    console.log("Connected to TikTok hub.");
-    G.connected = true;
-    setStatus("Connected to TikTok LIVE.");
-    setInGameStatus("Connected.");
-
-    // Only start game once we know we're connected
-    if (pendingStart && !gameStarted) {
-      beginGame();
-    }
-  });
-
-  client.on("disconnected", (reason) => {
-    console.log("Disconnected from TikTok hub:", reason);
-    G.connected = false;
-    const msg = reason || "Connection closed";
-    setStatus("Disconnected: " + msg);
-    setInGameStatus("Disconnected: " + msg);
-
-    if (!gameStarted) {
-      // Connection failed before game start; allow retry
-      pendingStart = false;
-    }
-  });
-
-  client.on("error", (err) => {
-    console.error("TikTok client error:", err);
-    setStatus("Error: " + (err && err.message ? err.message : "Unknown"));
-  });
-
-  client.on("chat", onChatMessage);
-  client.on("gift", onGiftMessage);
-
-  // Optional events:
-  client.on("like", (data) => {
-    try { handleTemplateLike(data || {}); } catch(e){ console.error("like handler:", e); }
-  });
-
-  client.on("join", (data) => {
-    try { handleTemplateJoin(data || {}); } catch(e){ console.error("join handler:", e); }
-  });
-
-  // Some connectors emit "share"
-  client.on("share", (data) => {
-    try { handleTemplateShare(data || {}); } catch(e){ console.error("share handler:", e); }
-  });
-
-  client.connect();
-}
-
 /* =========================================================
-   Template TikTok mapping (safe baseline)
+   Template TikTok mapping (baseline)
 ========================================================= */
 function handleTemplateChatAction(text, user, rawMsg){
   const cmd = lower(norm(G.settings.actionCommand || "!boost"));
   const joinCmd = lower(norm(G.settings.joinCommand || "!join"));
   const t = lower(norm(text));
 
-  // Join command
   if (joinCmd && t.startsWith(joinCmd)){
     const p = upsertPlayer(user);
     if (p){
@@ -580,7 +654,6 @@ function handleTemplateChatAction(text, user, rawMsg){
     return;
   }
 
-  // Action command
   if (cmd && t.includes(cmd)){
     const p = upsertPlayer(user);
     if (p){
@@ -597,7 +670,7 @@ function handleTemplateChatAction(text, user, rawMsg){
 
 function handleTemplateLike(likeEvt){
   const count =
-    Number(likeEvt.likeCount || likeEvt.count || (likeEvt.data && likeEvt.data.likeCount) || 1) || 1;
+    Number(likeEvt.likeCount || likeEvt.count || (likeEvt.data && (likeEvt.data.likeCount)) || 1) || 1;
 
   G.pulse = clamp(G.pulse + Math.min(8, count*0.15), 0, 100);
   if (G.pulse >= 100 && !G.pulseReady){
@@ -649,13 +722,10 @@ function handleTemplateShare(shareEvt){
   if (p){
     pushFlag({ who: p.nickname, msg: "shared the LIVE", pfp: p.pfp, cls: p.colorClass });
   }
-
-  // Optional: allow share to trigger same action for users whose chat isn’t visible
   if (G.settings.allowShareForAction){
     const cmd = norm(G.settings.actionCommand || "!boost");
     handleTemplateChatAction(cmd, u, shareEvt);
   }
-
   safeCallAI("share", shareEvt, u);
 }
 
@@ -675,9 +745,6 @@ function safeCallAI(kind, a, b, c){
   }
 }
 
-/* =========================================================
-   API exposed to AI region (stable, small surface)
-========================================================= */
 function GAME_API(){
   return {
     SPEC,
@@ -703,8 +770,6 @@ function GAME_API(){
 
 /* =========================================================
    AI REGION (server replaces ONLY between markers)
-   - MUST keep markers exactly, or your API will throw:
-     "Missing markers: // === AI_REGION_START === / // === AI_REGION_END ==="
 ========================================================= */
 
 // === AI_REGION_START ===
@@ -717,15 +782,12 @@ function GAME_API(){
   - Keep it lightweight.
 */
 
-// Optional AI hooks (override as needed)
 function aiSetup(ctx){}
 function aiOnChat(ctx, rawMsg, user, text){}
 function aiOnGift(ctx, giftEvt, user){}
 function aiOnLike(ctx, likeEvt, user){}
 function aiOnJoin(ctx, joinEvt, user){}
 function aiOnShare(ctx, shareEvt, user){}
-
-// Optional per-frame hooks (also overrideable)
 function aiUpdate(ctx, dt){}
 function aiRender(ctx, g2d){}
 // === AI_REGION_END ===
@@ -736,7 +798,7 @@ function aiRender(ctx, g2d){}
 function update(dt){
   G.time += dt;
 
-  // Host movement (keyboard / pointer)
+  // Host movement
   const sp = 240;
   let ax = 0, ay = 0;
   if (G.keys.has("ArrowLeft") || G.keys.has("a")) ax -= 1;
@@ -759,7 +821,7 @@ function update(dt){
   G.host.x = clamp(G.host.x + G.host.vx*dt, 40, BASE_W-40);
   G.host.y = clamp(G.host.y + G.host.vy*dt, 220, BASE_H-80);
 
-  // Always-active baseline spawns (so it never looks blank)
+  // Always-active baseline spawns
   if (Math.random() < dt * 0.8) spawnOrb(null, null, false);
   if (Math.random() < dt * 0.18) spawnEnemy(1);
 
@@ -776,7 +838,6 @@ function update(dt){
     if (o.y > BASE_H-80){ o.y = BASE_H-80; o.vy = -Math.abs(o.vy)*0.9; }
   }
 
-  // Center point
   const cx = BASE_W*0.5, cy = BASE_H*0.62;
 
   // Player orbits + collect
@@ -820,7 +881,6 @@ function update(dt){
     e.x += e.vx*dt;
     e.y += e.vy*dt;
 
-    // Reaches center: small penalty
     if (d < 40){
       G.score = Math.max(0, G.score - 2);
       addParticle(e.x, e.y, 14, "pink");
@@ -840,13 +900,12 @@ function update(dt){
     if (p.life <= 0) G.particles.splice(i,1);
   }
 
-  // AI per-frame hook
   try { if (typeof aiUpdate === "function") aiUpdate(GAME_API(), dt); }
   catch(e){ console.error("aiUpdate error:", e); }
 }
 
 function render(){
-  ctx2d.clearRect(0,0,BASE_W,BASE_H);
+  clearFrame();
 
   // soft grid
   ctx2d.globalAlpha = 0.08;
@@ -946,7 +1005,6 @@ function render(){
   ctx2d.fillText(G.pulseReady ? "PULSE READY" : "Pulse", barX, barY - 6);
   ctx2d.restore();
 
-  // AI render hook
   try { if (typeof aiRender === "function") aiRender(GAME_API(), ctx2d); }
   catch(e){ console.error("aiRender error:", e); }
 }
@@ -957,7 +1015,7 @@ function loop(t){
   const dt = clamp((ms - (G.lastT || ms)) / 1000, 0, 0.05);
   G.lastT = ms;
 
-  ensureDpr();
+  resizeCanvasToContainer();
   update(dt);
   render();
 
@@ -990,7 +1048,7 @@ function beginGame(){
 }
 
 /* =========================================================
-   Host input (local)
+   Host input
 ========================================================= */
 window.addEventListener("keydown", (e) => {
   G.keys.add(e.key);
@@ -1001,33 +1059,41 @@ window.addEventListener("keydown", (e) => {
 window.addEventListener("keyup", (e) => G.keys.delete(e.key));
 
 canvas.addEventListener("pointerdown", (e) => {
-  const rect = canvas.getBoundingClientRect();
+  const p = pointerToBase(e);
   G.pointer.down = true;
-  G.pointer.x = ((e.clientX - rect.left) / rect.width) * BASE_W;
-  G.pointer.y = ((e.clientY - rect.top) / rect.height) * BASE_H;
+  G.pointer.x = p.x;
+  G.pointer.y = p.y;
   try { canvas.setPointerCapture(e.pointerId); } catch(_){}
 });
 canvas.addEventListener("pointermove", (e) => {
   if (!G.pointer.down) return;
-  const rect = canvas.getBoundingClientRect();
-  G.pointer.x = ((e.clientX - rect.left) / rect.width) * BASE_W;
-  G.pointer.y = ((e.clientY - rect.top) / rect.height) * BASE_H;
+  const p = pointerToBase(e);
+  G.pointer.x = p.x;
+  G.pointer.y = p.y;
 });
 canvas.addEventListener("pointerup", () => { G.pointer.down = false; });
 
+window.addEventListener("resize", () => {
+  try { resizeCanvasToContainer(); } catch {}
+});
+
 /* =========================================================
-   Init + Start button wiring
+   Init + Start wiring
 ========================================================= */
 function init(){
   NOTIF_STYLE = getNotificationsStyle();
   if (flagsEl && NOTIF_STYLE !== "flags") flagsEl.style.display = "none";
 
+  // Make canvas fill its container; the transform handles letterboxing.
+  canvas.style.width = "100%";
+  canvas.style.height = "100%";
+
   // status
-  const ready = platformReady();
-  if (!ready.hasClient || !ready.hasProto){
-    setStatus("Waiting for injection… (works in ChatTokGaming preview/live)");
+  const r = platformReady();
+  if (!r.hasClient || !r.hasProto){
+    setStatus("Waiting for injection… (ChatTokGaming preview/live will inject)");
   } else {
-    setStatus("Ready. Enter LIVE ID and press Connect & Start Game.");
+    setStatus("Ready. Enter LIVE ID and press Start & Connect.");
   }
   setInGameStatus("Disconnected");
 
@@ -1040,18 +1106,44 @@ function init(){
       const liveId = norm(liveIdInput ? liveIdInput.value : "");
       pendingStart = true;
 
+      // Re-bridge every time the user clicks start
       const pr = platformReady();
 
-      // If platform scripts aren’t injected, start offline demo (never blank).
       if (!pr.hasClient || !pr.hasProto){
-        setStatus("Offline mode: platform scripts not injected here.");
-        setInGameStatus("Offline");
-        beginGame();
-        pendingStart = false;
+        // In preview, injection might arrive a moment later — retry briefly.
+        setStatus("Waiting for injection…");
+        setInGameStatus("Waiting…");
+
+        const startWait = nowMs();
+        const tick = () => {
+          const ok = platformReady();
+          if (ok.hasClient && ok.hasProto){
+            if (!liveId){
+              setStatus("No LIVE ID entered. Starting offline demo.");
+              setInGameStatus("Offline");
+              beginGame();
+              pendingStart = false;
+              return;
+            }
+            setStatus("Connecting…");
+            setInGameStatus("Connecting…");
+            setupTikTokClient(liveId);
+            return;
+          }
+          if (nowMs() - startWait > 5500){
+            // fall back
+            setStatus("Offline mode: platform scripts not injected into this frame.");
+            setInGameStatus("Offline");
+            beginGame();
+            pendingStart = false;
+            return;
+          }
+          setTimeout(tick, 250);
+        };
+        tick();
         return;
       }
 
-      // If no liveId, still start offline (playable immediately).
       if (!liveId){
         setStatus("No LIVE ID entered. Starting offline demo.");
         setInGameStatus("Offline");
@@ -1062,10 +1154,7 @@ function init(){
 
       setStatus("Connecting…");
       setInGameStatus("Connecting…");
-
-      // Connect via injected TikTokClient (requires window.proto)
       setupTikTokClient(liveId);
-      // beginGame() is called on "connected"
     } catch (e) {
       console.error(e);
       setStatus("Start error: " + (e && e.message ? e.message : "Unknown"));
@@ -1073,20 +1162,23 @@ function init(){
     }
   });
 
-  // re-check injection after first paint (some hosts inject later)
+  // Passive re-checks (injection can happen after initial load)
   setTimeout(() => {
     const r = platformReady();
     if (r.hasClient && r.hasProto){
-      setStatus("Ready. Enter LIVE ID and press Connect & Start Game.");
+      setStatus("Ready. Enter LIVE ID and press Start & Connect.");
     }
   }, 1200);
 
   setTimeout(() => {
     const r = platformReady();
     if (r.hasClient && r.hasProto){
-      setStatus("Ready. Enter LIVE ID and press Connect & Start Game.");
+      setStatus("Ready. Enter LIVE ID and press Start & Connect.");
     }
   }, 3200);
+
+  // Initial size
+  resizeCanvasToContainer();
 }
 
 init();

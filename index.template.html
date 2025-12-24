@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>{{TITLE}}</title>
 
-  <!-- Base-href fix for about:srcdoc contexts -->
+  <!-- Base href fix for about:srcdoc -->
   <script>
     (function () {
       try {
@@ -27,16 +27,14 @@
 
   <link rel="stylesheet" href="style.css" />
   <style>
-    /* Ensure overlay input is always interactable in iframes */
     #setupOverlay { z-index: 10; }
-    .overlay-card input { font-size: 16px; } /* iOS focus zoom prevention */
+    .overlay-card input { font-size: 16px; }
   </style>
 </head>
 
 <body>
   <div id="app">
     <div id="gameScreen" class="game-screen">
-      <!-- CONNECT-FIRST overlay -->
       <div id="setupOverlay" class="overlay" aria-live="polite">
         <div class="overlay-card">
           <div class="title">{{TITLE}}</div>
@@ -52,14 +50,7 @@
 
           <div class="row" style="margin-top:12px">
             <label class="label" for="liveIdInput">TikTok LIVE ID (Host)</label>
-            <input id="liveIdInput"
-                   class="input"
-                   placeholder="Example: huntbreaks"
-                   inputmode="text"
-                   autocomplete="off"
-                   autocapitalize="none"
-                   spellcheck="false"
-                   tabindex="0" />
+            <input id="liveIdInput" class="input" placeholder="Example: @huntbreaks or huntbreaks" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" tabindex="0" />
           </div>
 
           <button id="startGameBtn" class="btn primary" style="margin-top:12px" tabindex="0">Start</button>
@@ -75,7 +66,6 @@
         </div>
       </div>
 
-      <!-- Game canvas + HUD (built/used by game.js) -->
       <div id="gameRoot" class="root">
         <canvas id="gameCanvas" width="720" height="1280" aria-label="game-canvas"></canvas>
 
@@ -99,8 +89,7 @@
     </div>
   </div>
 
-  <!-- We no longer auto-fetch proto or tiktok-client here.
-       ChatTokGaming injects them; we simply wait for TikTokClient in game.js on Start. -->
+  <!-- Platform injects TikTok client; we just start game.js -->
   <script src="game.js"></script>
 </body>
 </html>

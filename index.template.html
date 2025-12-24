@@ -5,38 +5,50 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>{{TITLE}}</title>
 
-  <!-- Base-href fix for about:srcdoc contexts -->
+  <!--
+    IMPORTANT:
+    Some hosts render games inside iframe srcdoc (about:srcdoc). In that case, relative paths can resolve
+    to the host app's base href (/) instead of the game's folder, causing 404 for style.css / game.js.
+    We ONLY apply a base-href patch when running as about:* to avoid breaking normal hosting.
+  -->
   <script>
     (function () {
       try {
+        // Only apply base-href patch when this document is running as srcdoc/about:*
+        // (normal pages already resolve relative assets correctly).
         var isAbout = (location && String(location.protocol).toLowerCase() === "about:");
         var baseURI = (document && document.baseURI ? String(document.baseURI) : "");
         if (!isAbout && !/^about:/i.test(baseURI)) return;
+
+        // If host already set a base, don't override it.
         if (document.querySelector("base")) return;
+
+        // Prefer referrer (srcdoc best-case), fallback to parent location if same-origin and available.
         var ref = document.referrer;
         if (!ref && window.parent && window.parent.location) ref = window.parent.location.href;
         if (!ref) return;
+
         var u = new URL(ref);
+        // Directory of the parent page URL
         var dir = u.origin + u.pathname.replace(/[^\/]*$/, "");
+
         var base = document.createElement("base");
         base.href = dir;
         document.head.appendChild(base);
-      } catch (e) {}
+      } catch (e) {
+        // Fail silently; worst case, relative asset paths behave as host decides.
+      }
     })();
   </script>
 
   <link rel="stylesheet" href="style.css" />
-  <style>
-    #setupOverlay { z-index: 10; }
-    .overlay-card input { font-size: 16px; }
-  </style>
 </head>
 
 <body>
   <div id="app">
     <div id="gameScreen" class="game-screen">
-      <!-- Setup overlay -->
-      <div id="setupOverlay" class="overlay" aria-live="polite">
+      <!-- CONNECT-FIRST overlay -->
+      <div id="setupOverlay" class="overlay">
         <div class="overlay-card">
           <div class="title">{{TITLE}}</div>
           <div class="subtitle">{{ONE_SENTENCE}}</div>
@@ -51,43 +63,132 @@
 
           <div class="row" style="margin-top:12px">
             <label class="label" for="liveIdInput">TikTok LIVE ID (Host)</label>
-            <input id="liveIdInput" class="input" placeholder="Example: @huntbreaks or huntbreaks" inputmode="text" autocomplete="off" autocapitalize="none" spellcheck="false" tabindex="0" />
+            <input id="liveIdInput" class="input" placeholder="Example: huntbreaks" autocomplete="off" />
           </div>
 
-          <div class="row" style="gap:8px;margin-top:12px">
-            <button id="startGameBtn" class="btn primary" tabindex="0">Start</button>
-            <button id="startOfflineBtn" class="btn" tabindex="0" title="Preview without TikTok">Try Without TikTok</button>
-          </div>
+          <button id="startGameBtn" class="btn primary" style="margin-top:12px">Start</button>
 
           <div class="status" style="margin-top:10px">
             <span class="dot"></span>
-            <span id="statusText">Enter your LIVE ID, then press Start.</span>
+            <span id="statusText">Offline</span>
           </div>
 
           <div class="muted" style="margin-top:10px; font-size:12px; line-height:1.35">
-            TikTok connection is provided by ChatTokGaming during preview/live.
+            Note: TikTok connection is provided by ChatTokGaming during preview/live.
           </div>
         </div>
       </div>
 
-      <!-- Game container -->
+      <!-- Game canvas area -->
       <div id="gameRoot" class="root">
         <canvas id="gameCanvas" width="720" height="1280" aria-label="game-canvas"></canvas>
 
         <div class="hud">
           <div class="hud-left">
-            <div class="pill"><span class="k">Status</span><span class="v" id="statusTextInGame">Offline</span></div>
-            <div class="pill"><span class="k">Mode</span><span class="v">{{MODE_BADGE}}</span></div>
+            <div class="pill">
+              <span class="k">Status</span>
+              <span class="v" id="statusTextInGame">Offline</span>
+            </div>
+            <div class="pill">
+              <span class="k">Mode</span>
+              <span class="v">{{MODE_BADGE}}</span>
+            </div>
           </div>
-          <div class="hud-right" id="hudRight"></div>
+
+          <div class="hud-right" id="hudRight">
+            <!-- Optional right-side UI (AI / game.js may use) -->
+          </div>
         </div>
 
+        <!-- Right side flags container (optional, game.js will use if needed) -->
         <div id="flags" class="flags"></div>
       </div>
     </div>
   </div>
 
-  <!-- Platform injects TikTok client; we just run game.js -->
-  <script src="game.js"></script>
+  <script>
+    (function(){
+      const $ = (id) => document.getElementById(id);
+
+      const statusText = $("statusText");
+      const statusDot = document.querySelector(".status .dot");
+
+      function setStatus(text, ok){
+        try{
+          if (statusText) statusText.textContent = text;
+          if (statusDot) statusDot.style.opacity = ok ? "1" : ".55";
+        } catch {}
+      }
+
+      function loadScript(src){
+        return new Promise(function(resolve, reject){
+          var s = document.createElement("script");
+          s.src = src;
+          s.async = false;
+          s.onload = function(){ resolve(true); };
+          s.onerror = function(){ reject(new Error("Failed to load: " + src)); };
+          document.body.appendChild(s);
+        });
+      }
+
+      function hasGlobal(name){
+        try { return typeof window[name] !== "undefined" && window[name] != null; } catch { return false; }
+      }
+
+      var host = (location && location.hostname ? String(location.hostname) : "");
+      var isChatTok = /(^|\.)chattokgaming\.com$/i.test(host);
+
+      async function boot(){
+        // Contract:
+        // - ChatTokGaming preview/live provides proto + TikTokClient (do NOT fetch proto.bundle.js here).
+        // - Outside ChatTokGaming, optional local files may exist for dev testing.
+        setStatus("Loading…");
+
+        if (isChatTok){
+          // Never request proto.bundle.js in ChatTokGaming — avoids 404 + respects platform injection.
+          if (!hasGlobal("proto")){
+            throw new Error("Missing global 'proto'. ChatTokGaming must inject proto for TikTokClient deserialization.");
+          }
+          if (!hasGlobal("TikTokClient")){
+            throw new Error("Missing global 'TikTokClient'. ChatTokGaming must provide tiktok-client.js.");
+          }
+        } else {
+          // Optional: local testing (only if you manually place these next to index.html)
+          if (!hasGlobal("proto")){
+            await loadScript("proto.bundle.js");
+          }
+          if (!hasGlobal("TikTokClient")){
+            await loadScript("tiktok-client.js");
+          }
+          if (!hasGlobal("proto") || !hasGlobal("TikTokClient")){
+            throw new Error("Missing connection libs (proto/TikTokClient).");
+          }
+        }
+
+        await loadScript("game.js");
+        setStatus("Ready");
+      }
+
+      boot().catch(function(err){
+        console.error(err);
+        setStatus("Missing connection libs.", false);
+
+        // Friendly on-screen hint (no blocking popups)
+        try{
+          var root = $("gameRoot");
+          if (root){
+            var d = document.createElement("div");
+            d.className = "card";
+            d.style.margin = "12px";
+            d.innerHTML =
+              "<h3>Connection library missing</h3>" +
+              "<p>This game expects ChatTokGaming to provide the connection libraries: <b>proto</b> and <b>TikTokClient</b>.</p>" +
+              "<p class='muted'>If you’re previewing outside ChatTokGaming, these files won’t exist unless you add them manually.</p>";
+            root.appendChild(d);
+          }
+        } catch {}
+      });
+    })();
+  </script>
 </body>
 </html>

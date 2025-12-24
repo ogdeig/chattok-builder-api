@@ -1,8 +1,8 @@
 /* =========================================================
    ChatTok Game Template — game.template.js
-   - No pre-checks for TikTok libs.
-   - On Start, we poll for TikTokClient (up to 12s) and then connect.
-   - Keeps required connection pattern and robust UI.
+   - Settings overlay; accepts "@username" or "username".
+   - Waits for injected TikTokClient on Start (no proto fetch).
+   - Robust chat parsing + sound effects (WebAudio).
 ========================================================= */
 
 const SPEC = __SPEC_JSON__;
@@ -22,7 +22,7 @@ function setStatus(msg, ok = true){
   if (statusText) statusText.textContent = t;
   if (statusTextInGame) statusTextInGame.textContent = t;
   const pill = document.getElementById("connPill");
-  if (pill){ if (/connected/i.test(t)) pill.classList.add("connected"); else pill.classList.remove("connected"); }
+  if (pill){ if (/connected|victory/i.test(t)) pill.classList.add("connected"); else pill.classList.remove("connected"); }
 }
 
 /* Helpers */
@@ -31,11 +31,12 @@ function nowMs(){ return Date.now(); }
 function rand(a,b){ return a + Math.random()*(b-a); }
 function pick(arr){ return arr[Math.floor(Math.random()*arr.length)]; }
 function safeText(s, max=80){ return String(s||"").trim().replace(/\s+/g," ").slice(0,max); }
+function stripAt(s){ return String(s||"").trim().replace(/^@+/, ""); }
 
 function getChatTextFromMessage(m){ const t = m?.content ?? m?.comment ?? m?.text ?? m?.message ?? ""; return String(t||"").trim(); }
 function firstUrl(v){ if(!v) return ""; if(typeof v==="string") return v; if(Array.isArray(v)) return typeof v[0]==="string"?v[0]:""; return ""; }
 function getUserFromMessage(m){
-  const u = m?.user || m?.userInfo || {};
+  const u = m?.user || m?.userInfo || m?.sender || {};
   const userId = String(u.userId ?? u.id ?? m.userId ?? "");
   const uniqueId = String(u.uniqueId ?? u.username ?? m.uniqueId ?? "");
   const nickname = String(u.nickname ?? u.displayName ?? uniqueId || "viewer");
@@ -43,8 +44,30 @@ function getUserFromMessage(m){
   return { userId, uniqueId, nickname, avatar };
 }
 
-/* Build UI (created dynamically to guarantee IDs exist) */
-let canvas, ctx, W=0, H=0, DPR=1, ui={};
+/* WebAudio (tiny, no assets) */
+const SFX = (() => {
+  let ctx;
+  function getCtx(){ ctx = ctx || new (window.AudioContext||window.webkitAudioContext)(); return ctx; }
+  function beep({f=440,d=0.08,t="sine",g=0.2,slide=0}={}){
+    try{
+      const c = getCtx(); const o = c.createOscillator(); const v = c.createGain();
+      o.type = t; o.frequency.value = f; v.gain.value = g; o.connect(v); v.connect(c.destination);
+      const now = c.currentTime; if (slide){ o.frequency.setValueAtTime(f, now); o.frequency.exponentialRampToValueAtTime(Math.max(40,f+slide), now + d); }
+      v.gain.setValueAtTime(g, now); v.gain.exponentialRampToValueAtTime(0.0001, now + d);
+      o.start(); o.stop(now + d + 0.02);
+    }catch{}
+  }
+  return {
+    shot(){ beep({f:640,d:0.06,t:"square",g:0.15,slide:-320}); },
+    hit(){ beep({f:220,d:0.08,t:"sawtooth",g:0.2,slide:-100}); },
+    boost(){ beep({f:540,d:0.18,t:"triangle",g:0.18,slide:220}); },
+    victory(){ beep({f:660,d:0.12,t:"square",g:0.2}); setTimeout(()=>beep({f:880,d:0.12,t:"square",g:0.2}),120); },
+    defeat(){ beep({f:200,d:0.25,t:"sine",g:0.25,slide:-160}); }
+  };
+})();
+
+/* Build UI dynamically (guaranteed IDs) */
+let canvas, ctx2d, W=0, H=0, DPR=1, ui={};
 function clearEl(el){ if(!el) return; while(el.firstChild) el.removeChild(el.firstChild); }
 function buildUI(){
   clearEl(gameRoot);
@@ -124,8 +147,8 @@ function buildUI(){
   gameRoot.appendChild(stage);
   gameRoot.appendChild(flags);
 
-  try { ctx = canvas.getContext("2d", { alpha: true, desynchronized: true }); }
-  catch { ctx = canvas.getContext("2d"); }
+  try { ctx2d = canvas.getContext("2d", { alpha: true, desynchronized: true }); }
+  catch { ctx2d = canvas.getContext("2d"); }
 
   resizeCanvas();
   window.addEventListener("resize", resizeCanvas, { passive: true });
@@ -153,7 +176,7 @@ function resizeCanvas(){
   W = canvas.width; H = canvas.height;
 }
 
-/* Small toasts */
+/* Flags (small toasts) */
 function escapeHtml(s){ return String(s||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;"); }
 function flagNotify({ who, msg }){
   const flags = document.getElementById("flags");
@@ -166,7 +189,7 @@ function flagNotify({ who, msg }){
   setTimeout(()=>{ try{ wrap.remove(); }catch{} }, 3000);
 }
 
-/* Settings section on the overlay (kept minimal) */
+/* Settings panel on overlay */
 function ensureSettingsUI(){
   const card = setupOverlay ? setupOverlay.querySelector(".overlay-card") : null;
   if (!card || card.querySelector("#ctSettings")) return;
@@ -239,6 +262,7 @@ function onChatMessage(data){
     if (low.startsWith(actKW)) {
       const speed = 820;
       state.shots.push({ x: W/2, y: H-120, vx: 0, vy: -speed, r: 5 });
+      SFX.shot();
     }
   }catch(e){ console.error("Error in chat handler:", e); }
 }
@@ -279,6 +303,7 @@ function setupTikTokClient(liveId) {
     state.power = clamp(state.power + 0.2, 0, 1);
     const u = getUserFromMessage(data);
     flagNotify({ who:u.nickname, msg:"Gift!" });
+    SFX.boost();
   });
   client.on("like", () => {
     state.likes += 1;
@@ -288,7 +313,7 @@ function setupTikTokClient(liveId) {
   client.connect();
 }
 
-/* Poll for TikTokClient on Start (no auto-load; platform injects it) */
+/* Wait for TikTokClient on Start */
 async function waitForTikTokClient(timeoutMs = 12000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -298,7 +323,7 @@ async function waitForTikTokClient(timeoutMs = 12000) {
   return false;
 }
 
-/* Loop + gameplay (simple but lively) */
+/* Gameplay */
 function ensureStars(){
   if (state.stars.length) return;
   for (let i=0;i<80;i++) state.stars.push({ x:Math.random(), y:Math.random(), z:rand(0.2,1), t:rand(0,Math.PI*2) });
@@ -333,21 +358,21 @@ function updateHUD(){
 }
 
 function draw(){
-  if (!ctx) return;
-  ctx.clearRect(0,0,W,H);
+  if (!ctx2d) return;
+  ctx2d.clearRect(0,0,W,H);
 
   ensureStars();
   for (const s of state.stars){
     s.t += 0.02; const a = (Math.sin(s.t)+1)/2 * 0.8 + 0.2;
-    ctx.globalAlpha = a; ctx.fillStyle = "white";
-    ctx.beginPath(); ctx.arc(s.x*W, s.y*H, s.z*1.6, 0, Math.PI*2); ctx.fill(); ctx.globalAlpha = 1;
+    ctx2d.globalAlpha = a; ctx2d.fillStyle = "white";
+    ctx2d.beginPath(); ctx2d.arc(s.x*W, s.y*H, s.z*1.6, 0, Math.PI*2); ctx2d.fill(); ctx2d.globalAlpha = 1;
   }
 
-  ctx.fillStyle = "rgba(255,255,255,.92)";
-  for (const m of state.meteors){ ctx.beginPath(); ctx.arc(m.x, m.y, m.r, 0, Math.PI*2); ctx.fill(); }
+  ctx2d.fillStyle = "rgba(255,255,255,.92)";
+  for (const m of state.meteors){ ctx2d.beginPath(); ctx2d.arc(m.x, m.y, m.r, 0, Math.PI*2); ctx2d.fill(); }
 
-  ctx.fillStyle = "#00f2ea";
-  for (const s of state.shots){ ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx.fill(); }
+  ctx2d.fillStyle = "#00f2ea";
+  for (const s of state.shots){ ctx2d.beginPath(); ctx2d.arc(s.x, s.y, s.r, 0, Math.PI*2); ctx2d.fill(); }
 }
 
 function update(dt){
@@ -361,6 +386,7 @@ function update(dt){
       const dx=s.x-m.x, dy=s.y-m.y, rr=(s.r+m.r); if (dx*dx+dy*dy <= rr*rr){
         m.hp -= 1; s.r = 0;
         state.score += (m.r<24?3:m.r<32?5:8);
+        SFX.hit();
       }
     }
   }
@@ -376,10 +402,10 @@ function update(dt){
   if (gameStarted && state.roundLeft > 0){
     state.roundLeft = Math.max(0, state.roundLeft - dt);
     if (state.roundLeft === 0 || state.baseHP <= 0){
-      setStatus("Defeat", true);
+      setStatus("Defeat", true); SFX.defeat();
     }
     if (state.score >= 300 && state.baseHP > 0){
-      setStatus("Victory", true);
+      setStatus("Victory", true); SFX.victory();
     }
   }
 
@@ -403,7 +429,8 @@ window.addEventListener("load", () => {
   if (startGameBtn) {
     startGameBtn.addEventListener("click", async () => {
       try{
-        const liveId = String(liveIdInput && liveIdInput.value ? liveIdInput.value : "").trim().replace(/^@/, "");
+        const liveIdRaw = String(liveIdInput && liveIdInput.value ? liveIdInput.value : "");
+        const liveId = stripAt(liveIdRaw);
         if (!liveId){ setStatus("Enter a LIVE ID.", false); liveIdInput?.focus(); return; }
 
         setStatus("Waiting for TikTok client…");
@@ -413,7 +440,7 @@ window.addEventListener("load", () => {
         pendingStart = true;
         setStatus("Connecting…", true);
         setupTikTokClient(liveId);
-        // beginGame happens on "connected" (or immediately if already connected)
+        // beginGame happens on "connected"
       }catch(e){
         console.error(e);
         setStatus("Error: " + (e?.message || "Unknown"), false);

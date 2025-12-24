@@ -1,14 +1,17 @@
+/**
+ * ChatTok Builder API (Render)
+ * - Endpoints: /health, /api/plan, /api/generate, /api/edit
+ * - Uses OpenAI Responses API with Structured Outputs. If OpenAI fails or times out,
+ *   returns a safe, polished baseline from our templates (no blank screens).
+ *
+ * Security: No secrets leak to clients. CORS restricted via env.
+ */
+
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
-
-/**
- * ChatTok Builder API (Render)
- * - Provides: /health, /api/plan, /api/generate, /api/edit
- * - Uses OpenAI Responses API + Structured Outputs (JSON schema) for reliable JSON.
- */
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -21,18 +24,16 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
   .map((s) => s.trim())
   .filter(Boolean);
 
-// Dev-friendly fallback if ALLOWED_ORIGINS not set:
-// - allow all origins (useful for testing) but still handle credentials safely.
 const corsOptions = {
   origin: function (origin, cb) {
-    if (!origin) return cb(null, true); // server-to-server / curl
+    if (!origin) return cb(null, true);
     if (allowedOrigins.length === 0) return cb(null, true);
     if (allowedOrigins.includes(origin)) return cb(null, true);
     return cb(new Error("CORS blocked: " + origin));
   },
   methods: ["GET", "POST", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
-  optionsSuccessStatus: 204,
+  optionsSuccessStatus: 204
 };
 
 app.use(cors(corsOptions));
@@ -43,20 +44,12 @@ app.options("*", cors(corsOptions));
 // ---------------------------
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_MODEL_DEFAULT = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_TIMEOUT_MS = Number.parseInt(process.env.OPENAI_TIMEOUT_MS || "35000", 10);
 
-function assert(cond, msg) {
-  if (!cond) {
-    const e = new Error(msg || "Assertion failed");
-    throw e;
-  }
-}
+function assert(cond, msg) { if (!cond) throw new Error(msg || "Assertion failed"); }
 
 function safeJson(obj) {
-  try {
-    return JSON.stringify(obj);
-  } catch {
-    return '"[unserializable]"';
-  }
+  try { return JSON.stringify(obj); } catch { return '"[unserializable]"'; }
 }
 
 // ---------------------------
@@ -66,7 +59,6 @@ function extractAssistantText(respJson) {
   if (!respJson) return "";
   if (typeof respJson.output_text === "string") return respJson.output_text;
 
-  // Walk output -> message -> content -> output_text
   const out = respJson.output;
   if (!Array.isArray(out)) return "";
   const texts = [];
@@ -75,103 +67,66 @@ function extractAssistantText(respJson) {
     const content = item.content;
     if (!Array.isArray(content)) continue;
     for (const c of content) {
-      if (c && c.type === "output_text" && typeof c.text === "string") {
-        texts.push(c.text);
-      }
+      if (c && c.type === "output_text" && typeof c.text === "string") texts.push(c.text);
     }
   }
   return texts.join("\n").trim();
 }
 
 function parseJsonLoose(text) {
-  // Best-effort parse: accept plain JSON or JSON inside a code block.
   if (typeof text !== "string") return null;
   const t = text.trim();
   if (!t) return null;
 
-  // Strip ```json fences
   const fenceMatch = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   const candidate = fenceMatch ? fenceMatch[1].trim() : t;
 
-  try {
-    return JSON.parse(candidate);
-  } catch {
-    // Attempt to find first {...} span
+  try { return JSON.parse(candidate); }
+  catch {
     const start = candidate.indexOf("{");
     const end = candidate.lastIndexOf("}");
     if (start >= 0 && end > start) {
-      try {
-        return JSON.parse(candidate.slice(start, end + 1));
-      } catch {
-        return null;
-      }
+      try { return JSON.parse(candidate.slice(start, end + 1)); } catch { return null; }
     }
     return null;
   }
 }
 
-async function callOpenAIResponses({
-  apiKey,
-  model,
-  maxOutputTokens = 900,
-  temperature = 0.2,
-  prompt,
-  schemaName,
-  schema,
-}) {
+async function callOpenAIResponses({ apiKey, model, maxOutputTokens = 900, temperature = 0.2, prompt, schemaName, schema }) {
   const key = apiKey || OPENAI_API_KEY;
-  if (!key) {
-    const err = new Error("OPENAI_API_KEY is missing on the server");
-    err.status = 503;
-    throw err;
-  }
+  if (!key) { const err = new Error("OPENAI_API_KEY is missing on the server"); err.status = 503; throw err; }
 
   const endpoint = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1/responses").trim();
-  const timeoutMs = Number.parseInt(process.env.OPENAI_TIMEOUT_MS || "35000", 10);
 
   const body = {
     model: model || OPENAI_MODEL_DEFAULT,
     store: false,
     temperature,
     max_output_tokens: maxOutputTokens,
-    // Responses API accepts either a string or an array of input items.
-    // We use an array so we can set roles cleanly.
-    input: [{ role: "user", content: String(prompt || "") }],
+    input: [{ role: "user", content: String(prompt || "") }]
   };
 
   if (schema) {
-    // Responses API Structured Outputs uses `text.format` with a json_schema format.
-    // https://platform.openai.com/docs/guides/structured-outputs
     body.text = {
-      format: {
-        type: "json_schema",
-        name: schemaName || "structured_output",
-        strict: true,
-        schema,
-      },
+      format: { type: "json_schema", name: schemaName || "structured_output", strict: true, schema }
     };
   }
 
   const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), timeoutMs);
+  const to = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
 
   let r;
   try {
     r = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${key}`,
-      },
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
       body: JSON.stringify(body),
-      signal: controller.signal,
+      signal: controller.signal
     });
   } catch (e) {
-    const err = new Error(
-      e && e.name === "AbortError"
-        ? `OpenAI request timed out after ${timeoutMs}ms`
-        : "OpenAI request failed (network/transport error)"
-    );
+    const err = new Error(e && e.name === "AbortError"
+      ? `OpenAI request timed out after ${OPENAI_TIMEOUT_MS}ms`
+      : "OpenAI request failed (network/transport error)");
     err.status = e && e.name === "AbortError" ? 504 : 502;
     err.cause = e;
     throw err;
@@ -180,22 +135,10 @@ async function callOpenAIResponses({
   }
 
   let json;
-  try {
-    json = await r.json();
-  } catch (e) {
-    const err = new Error("OpenAI response was not valid JSON");
-    err.status = 502;
-    err.cause = e;
-    throw err;
-  }
+  try { json = await r.json(); }
+  catch (e) { const err = new Error("OpenAI response was not valid JSON"); err.status = 502; err.cause = e; throw err; }
 
-  if (!r.ok) {
-    const err = new Error("OpenAI error");
-    err.status = r.status;
-    err.details = json;
-    throw err;
-  }
-
+  if (!r.ok) { const err = new Error("OpenAI error"); err.status = r.status; err.details = json; throw err; }
   return json;
 }
 
@@ -203,104 +146,64 @@ async function callOpenAIResponses({
 // 4) Templates
 // ---------------------------
 function resolveTemplatePath(filename) {
-  // Render: templates should be deployed alongside server.js (same directory)
-  // If you keep templates in /templates, set TEMPLATE_DIR env.
-  const base = process.env.TEMPLATE_DIR
-    ? path.resolve(process.env.TEMPLATE_DIR)
-    : path.resolve(__dirname);
+  const base = process.env.TEMPLATE_DIR ? path.resolve(process.env.TEMPLATE_DIR) : path.resolve(__dirname);
   return path.join(base, filename);
 }
-
 function readTemplate(filename) {
   const p = resolveTemplatePath(filename);
   assert(fs.existsSync(p), `Template not found: ${filename} at ${p}`);
   return fs.readFileSync(p, "utf8");
 }
-
-// Load once at startup for stability
-let TPL_INDEX = "";
-let TPL_STYLE = "";
-let TPL_GAME = "";
-
+let TPL_INDEX = "", TPL_STYLE = "", TPL_GAME = "";
 function loadTemplates() {
   TPL_INDEX = readTemplate("index.template.html");
   TPL_STYLE = readTemplate("style.template.css");
   TPL_GAME = readTemplate("game.template.js");
 }
-
 loadTemplates();
 
 // ---------------------------
-// 5) Schema definitions
+// 5) Schemas
 // ---------------------------
 const PLAN_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
+  type: "object", additionalProperties: false,
   properties: {
     title: { type: "string" },
     genre: { type: "string" },
     oneLiner: { type: "string" },
     coreLoop: { type: "string" },
-    entities: {
-      type: "array",
-      items: { type: "string" },
-    },
+    entities: { type: "array", items: { type: "string" } },
     controls: {
-      type: "object",
-      additionalProperties: false,
+      type: "object", additionalProperties: false,
       properties: {
-        chat: { type: "string" },
-        gifts: { type: "string" },
-        likes: { type: "string" },
-        joins: { type: "string" },
-      },
-      required: ["chat", "gifts", "likes", "joins"],
+        chat: { type: "string" }, gifts: { type: "string" }, likes: { type: "string" }, joins: { type: "string" }
+      }, required: ["chat", "gifts", "likes", "joins"]
     },
     ui: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        theme: { type: "string" },
-        hud: { type: "string" },
-        feedback: { type: "string" },
-      },
-      required: ["theme", "hud", "feedback"],
+      type: "object", additionalProperties: false,
+      properties: { theme: { type: "string" }, hud: { type: "string" }, feedback: { type: "string" } },
+      required: ["theme", "hud", "feedback"]
     },
     safety: {
-      type: "object",
-      additionalProperties: false,
+      type: "object", additionalProperties: false,
       properties: {
-        noExternalSecrets: { type: "boolean" },
-        noProtoBundle: { type: "boolean" },
-        notes: { type: "string" },
-      },
-      required: ["noExternalSecrets", "noProtoBundle", "notes"],
-    },
+        noExternalSecrets: { type: "boolean" }, noProtoBundle: { type: "boolean" }, notes: { type: "string" }
+      }, required: ["noExternalSecrets", "noProtoBundle", "notes"]
+    }
   },
-  required: ["title", "genre", "oneLiner", "coreLoop", "entities", "controls", "ui", "safety"],
+  required: ["title", "genre", "oneLiner", "coreLoop", "entities", "controls", "ui", "safety"]
 };
 
 const FILE_PACKAGE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    indexHtml: { type: "string" },
-    styleCss: { type: "string" },
-    gameJs: { type: "string" },
-  },
-  required: ["indexHtml", "styleCss", "gameJs"],
+  type: "object", additionalProperties: false,
+  properties: { indexHtml: { type: "string" }, styleCss: { type: "string" }, gameJs: { type: "string" } },
+  required: ["indexHtml", "styleCss", "gameJs"]
 };
 
 const EDIT_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    indexHtml: { type: "string" },
-    styleCss: { type: "string" },
-    gameJs: { type: "string" },
-    notes: { type: "string" },
-  },
-  required: ["indexHtml", "styleCss", "gameJs", "notes"],
+  type: "object", additionalProperties: false,
+  properties: { indexHtml: { type: "string" }, styleCss: { type: "string" }, gameJs: { type: "string" }, notes: { type: "string" } },
+  required: ["indexHtml", "styleCss", "gameJs", "notes"]
 };
 
 // ---------------------------
@@ -313,13 +216,7 @@ function normalizePlan(plan) {
   assert(Array.isArray(plan.entities), "Plan.entities must be array");
   return plan;
 }
-
-function validatePlan(maybePlan) {
-  const plan = normalizePlan(maybePlan);
-  // Lightweight checks; schema enforcement is handled by Structured Outputs.
-  return plan;
-}
-
+function validatePlan(maybePlan) { return normalizePlan(maybePlan); }
 function validateFilePackage(pkg) {
   assert(pkg && typeof pkg === "object", "Package must be an object");
   assert(typeof pkg.indexHtml === "string" && pkg.indexHtml.length > 10, "indexHtml missing");
@@ -329,7 +226,62 @@ function validateFilePackage(pkg) {
 }
 
 // ---------------------------
-// 7) Routes
+// 7) Rendering helpers (fallbacks + theming)
+// ---------------------------
+function applyThemeVars(css, theme) {
+  const t = theme || {};
+  const primary = t.primary || "#ff0050";
+  const secondary = t.secondary || "#00f2ea";
+  const background = t.background || "#050b17";
+  return String(css)
+    .replaceAll("__THEME_PRIMARY__", primary)
+    .replaceAll("__THEME_SECONDARY__", secondary)
+    .replaceAll("__THEME_BACKGROUND__", background);
+}
+
+function renderIndex(spec, theme) {
+  const s = spec || {};
+  const howTo = Array.isArray(s.howTo) ? s.howTo : [
+    "Type JOIN to enter the match.",
+    "Use chat commands to act. Likes charge power, gifts trigger boosts."
+  ];
+  const li = howTo.map(item => `<li>${String(item)}</li>`).join("\n");
+
+  return TPL_INDEX
+    .replaceAll("{{TITLE}}", String(s.title || "ChatTok Game"))
+    .replaceAll("{{ONE_SENTENCE}}", String(s.oneLiner || "Fast-paced TikTok LIVE game."))
+    .replaceAll("{{SUBTITLE}}", String(s.coreLoop || "Play via chat. Likes power up, gifts trigger boosts."))
+    .replaceAll("{{HOW_TO_PLAY_LI}}", li)
+    .replaceAll("{{MODE_BADGE}}", "LIVE");
+}
+
+function renderStyle(theme) {
+  return applyThemeVars(TPL_STYLE, theme);
+}
+
+function renderGame(spec) {
+  const specJson = safeJson(spec || {});
+  return TPL_GAME.replace("__SPEC_JSON__", specJson);
+}
+
+function sanitizeCss(css) {
+  // Minimal pragmatic sanitizer for known corruption shapes
+  let out = String(css || "");
+  out = out.replace(/body\s*\{[^}]*body\s*\{/gi, "body {");
+  out = out.replace(/:root\s*\{([^}]*)\}:root\s*\{/gi, ":root{$1}");
+  // best-effort balance (truncate trailing unmatched brace runs)
+  const open = (out.match(/\{/g) || []).length;
+  const close = (out.match(/\}/g) || []).length;
+  if (close > open) {
+    // drop extra trailing braces
+    let extra = close - open;
+    out = out.replace(/\}$/g, m => (extra-- > 0 ? "" : m));
+  }
+  return out;
+}
+
+// ---------------------------
+// 8) Routes
 // ---------------------------
 app.get("/health", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
@@ -338,12 +290,10 @@ app.get("/health", (req, res) => {
     service: "chattok-builder-api",
     modelDefault: OPENAI_MODEL_DEFAULT,
     hasOpenAIKey: Boolean(OPENAI_API_KEY),
-    allowedOrigins: allowedOrigins.length ? allowedOrigins : ["* (dev default)"],
-    templatesLoaded: Boolean(TPL_INDEX && TPL_STYLE && TPL_GAME),
+    templatesLoaded: Boolean(TPL_INDEX && TPL_STYLE && TPL_GAME)
   });
 });
 
-// IMPORTANT: builder may call GET /api/plan for quick connectivity checks.
 app.get("/api/plan", (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   res.json({ ok: true, message: "POST your prompt to /api/plan" });
@@ -375,26 +325,36 @@ Rules:
 Return JSON matching the schema exactly.
 `.trim();
 
-    const resp = await callOpenAIResponses({
-      prompt: planPrompt,
-      schemaName: "game_plan",
-      schema: PLAN_SCHEMA,
-      maxOutputTokens: 650,
-      temperature: 0.2,
-    });
-
-    const text = extractAssistantText(resp);
-    const parsed = parseJsonLoose(text) || resp.output_parsed || null;
-    const plan = validatePlan(parsed);
+    let plan;
+    try {
+      const resp = await callOpenAIResponses({
+        prompt: planPrompt,
+        schemaName: "game_plan",
+        schema: PLAN_SCHEMA,
+        maxOutputTokens: 650,
+        temperature: 0.2
+      });
+      const text = extractAssistantText(resp);
+      const parsed = parseJsonLoose(text) || resp.output_parsed || null;
+      plan = validatePlan(parsed);
+    } catch (e) {
+      // Fallback minimal plan to avoid 500s
+      plan = validatePlan({
+        title: "ChatTok Arena",
+        genre: "Arcade",
+        oneLiner: "Join via chat, fire with a command; likes charge power, gifts trigger boosts.",
+        coreLoop: "Players join and use commands to attack targets while likes/gifts influence power-ups.",
+        entities: ["player", "meteor", "shot", "explosion"],
+        controls: { chat: "join + action commands", gifts: "power boosts", likes: "charge meter", joins: "create player" },
+        ui: { theme: "dark neon", hud: "score/players/likes/gifts", feedback: "pops + flags" },
+        safety: { noExternalSecrets: true, noProtoBundle: true, notes: "No external libs, no secrets" }
+      });
+    }
 
     res.json({ ok: true, plan });
   } catch (err) {
-    console.error("/api/plan error:", err && err.message ? err.message : err, err && err.details ? err.details : "");
-    res.status(err.status || 500).json({
-      ok: false,
-      error: err.message || "Server error",
-      details: err.details || null,
-    });
+    console.error("/api/plan error:", err?.message || err, err?.details || "");
+    res.status(err.status || 500).json({ ok: false, error: err.message || "Server error", details: err.details || null });
   }
 });
 
@@ -437,31 +397,50 @@ You must embed clear, short instructions inside the UI (non-blocking), and imple
 Return JSON with three strings: indexHtml, styleCss, gameJs.
 `.trim();
 
-    const resp = await callOpenAIResponses({
-      prompt: generationPrompt,
-      schemaName: "file_package",
-      schema: FILE_PACKAGE_SCHEMA,
-      maxOutputTokens: 2400,
-      temperature: 0.25,
-    });
+    let pkg;
+    try {
+      const resp = await callOpenAIResponses({
+        prompt: generationPrompt,
+        schemaName: "file_package",
+        schema: FILE_PACKAGE_SCHEMA,
+        maxOutputTokens: 2400,
+        temperature: 0.25
+      });
+      const text = extractAssistantText(resp);
+      const parsed = parseJsonLoose(text) || resp.output_parsed || null;
+      pkg = validateFilePackage(parsed);
+      // Guardrail CSS
+      pkg.styleCss = sanitizeCss(pkg.styleCss);
+    } catch (e) {
+      // Guaranteed baseline fallback (templates)
+      pkg = {
+        indexHtml: renderIndex(plan, theme),
+        styleCss: renderStyle(theme),
+        gameJs: renderGame(plan)
+      };
+    }
 
-    const text = extractAssistantText(resp);
-    const parsed = parseJsonLoose(text) || resp.output_parsed || null;
-    const pkg = validateFilePackage(parsed);
-
-    // Basic hardening: ensure templates didn't get dropped to blank content
+    // Basic hardening
     assert(pkg.indexHtml.includes("<html") || pkg.indexHtml.includes("<!doctype"), "indexHtml seems invalid");
     assert(pkg.styleCss.includes("{") || pkg.styleCss.includes(":root"), "styleCss seems invalid");
     assert(pkg.gameJs.includes("function") || pkg.gameJs.includes("const"), "gameJs seems invalid");
 
     res.json({ ok: true, files: pkg });
   } catch (err) {
-    console.error("/api/generate error:", err && err.message ? err.message : err, err && err.details ? err.details : "");
-    res.status(err.status || 500).json({
-      ok: false,
-      error: err.message || "Server error",
-      details: err.details || null,
-    });
+    console.error("/api/generate error:", err?.message || err, err?.details || "");
+    // As a last-resort, still try to return the baseline if plan exists
+    try {
+      const { plan, theme } = req.body || {};
+      if (plan && typeof plan === "object") {
+        const pkg = {
+          indexHtml: renderIndex(plan, theme),
+          styleCss: renderStyle(theme),
+          gameJs: renderGame(plan)
+        };
+        return res.status(200).json({ ok: true, files: pkg });
+      }
+    } catch {}
+    res.status(err.status || 500).json({ ok: false, error: err.message || "Server error", details: err.details || null });
   }
 });
 
@@ -503,36 +482,38 @@ ${gameJs}
 Return JSON with updated: indexHtml, styleCss, gameJs, and a short notes string describing what changed.
 `.trim();
 
-    const resp = await callOpenAIResponses({
-      prompt: editPrompt,
-      schemaName: "edit_package",
-      schema: EDIT_SCHEMA,
-      maxOutputTokens: 2400,
-      temperature: 0.2,
-    });
+    let parsed;
+    try {
+      const resp = await callOpenAIResponses({
+        prompt: editPrompt,
+        schemaName: "edit_package",
+        schema: EDIT_SCHEMA,
+        maxOutputTokens: 2400,
+        temperature: 0.2
+      });
+      const text = extractAssistantText(resp);
+      parsed = parseJsonLoose(text) || resp.output_parsed || null;
 
-    const text = extractAssistantText(resp);
-    const parsed = parseJsonLoose(text) || resp.output_parsed || null;
-
-    assert(parsed && typeof parsed === "object", "Edit response not parsed");
-    assert(typeof parsed.indexHtml === "string", "Edited indexHtml missing");
-    assert(typeof parsed.styleCss === "string", "Edited styleCss missing");
-    assert(typeof parsed.gameJs === "string", "Edited gameJs missing");
-    assert(typeof parsed.notes === "string", "Edited notes missing");
+      assert(parsed && typeof parsed === "object", "Edit response not parsed");
+      assert(typeof parsed.indexHtml === "string", "Edited indexHtml missing");
+      assert(typeof parsed.styleCss === "string", "Edited styleCss missing");
+      assert(typeof parsed.gameJs === "string", "Edited gameJs missing");
+      assert(typeof parsed.notes === "string", "Edited notes missing");
+      parsed.styleCss = sanitizeCss(parsed.styleCss);
+    } catch (e) {
+      // Safe no-op: return the same files with a note if edit AI fails
+      parsed = { indexHtml, styleCss: sanitizeCss(styleCss), gameJs, notes: "No changes (edit AI failed)."};
+    }
 
     res.json({ ok: true, files: parsed });
   } catch (err) {
-    console.error("/api/edit error:", err && err.message ? err.message : err, err && err.details ? err.details : "");
-    res.status(err.status || 500).json({
-      ok: false,
-      error: err.message || "Server error",
-      details: err.details || null,
-    });
+    console.error("/api/edit error:", err?.message || err, err?.details || "");
+    res.status(err.status || 500).json({ ok: false, error: err.message || "Server error", details: err.details || null });
   }
 });
 
 // ---------------------------
-// 8) Start server (ONE listen)
+// 9) Start server (ONE listen)
 // ---------------------------
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {

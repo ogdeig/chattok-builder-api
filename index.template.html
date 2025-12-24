@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <title>{{TITLE}}</title>
 
-  <!-- Base-href fix for about:srcdoc to keep style.css/game.js relative paths working -->
+  <!-- Base-href fix for about:srcdoc contexts -->
   <script>
     (function () {
       try {
@@ -26,13 +26,18 @@
   </script>
 
   <link rel="stylesheet" href="style.css" />
+  <style>
+    /* Ensure overlay input is always interactable in iframes */
+    #setupOverlay { z-index: 10; }
+    .overlay-card input { font-size: 16px; } /* iOS focus zoom prevention */
+  </style>
 </head>
 
 <body>
   <div id="app">
     <div id="gameScreen" class="game-screen">
       <!-- CONNECT-FIRST overlay -->
-      <div id="setupOverlay" class="overlay">
+      <div id="setupOverlay" class="overlay" aria-live="polite">
         <div class="overlay-card">
           <div class="title">{{TITLE}}</div>
           <div class="subtitle">{{ONE_SENTENCE}}</div>
@@ -47,14 +52,21 @@
 
           <div class="row" style="margin-top:12px">
             <label class="label" for="liveIdInput">TikTok LIVE ID (Host)</label>
-            <input id="liveIdInput" class="input" placeholder="Example: huntbreaks" autocomplete="off" />
+            <input id="liveIdInput"
+                   class="input"
+                   placeholder="Example: huntbreaks"
+                   inputmode="text"
+                   autocomplete="off"
+                   autocapitalize="none"
+                   spellcheck="false"
+                   tabindex="0" />
           </div>
 
-          <button id="startGameBtn" class="btn primary" style="margin-top:12px">Start</button>
+          <button id="startGameBtn" class="btn primary" style="margin-top:12px" tabindex="0">Start</button>
 
           <div class="status" style="margin-top:10px">
             <span class="dot"></span>
-            <span id="statusText">Offline</span>
+            <span id="statusText">Enter your LIVE ID, then press Start.</span>
           </div>
 
           <div class="muted" style="margin-top:10px; font-size:12px; line-height:1.35">
@@ -63,7 +75,7 @@
         </div>
       </div>
 
-      <!-- Game canvas area -->
+      <!-- Game canvas + HUD (built/used by game.js) -->
       <div id="gameRoot" class="root">
         <canvas id="gameCanvas" width="720" height="1280" aria-label="game-canvas"></canvas>
 
@@ -79,86 +91,16 @@
             </div>
           </div>
 
-          <div class="hud-right" id="hudRight">
-            <!-- Optional right-side UI (AI / game.js may use) -->
-          </div>
+          <div class="hud-right" id="hudRight"></div>
         </div>
 
-        <!-- Right side flags container (optional, game.js will use if needed) -->
         <div id="flags" class="flags"></div>
       </div>
     </div>
   </div>
 
-  <script>
-    (function(){
-      const $ = (id) => document.getElementById(id);
-
-      const statusText = $("statusText");
-      const statusDot = document.querySelector(".status .dot");
-
-      function setStatus(text, ok){
-        try{
-          if (statusText) statusText.textContent = text;
-          if (statusDot) statusDot.style.opacity = ok ? "1" : ".55";
-        } catch {}
-      }
-
-      function loadScript(src){
-        return new Promise(function(resolve, reject){
-          var s = document.createElement("script");
-          s.src = src;
-          s.async = false;
-          s.onload = function(){ resolve(true); };
-          s.onerror = function(){ reject(new Error("Failed to load: " + src)); };
-          document.body.appendChild(s);
-        });
-      }
-
-      function hasGlobal(name){
-        try { return typeof window[name] !== "undefined" && window[name] != null; } catch { return false; }
-      }
-
-      var host = (location && location.hostname ? String(location.hostname) : "");
-      var isChatTok = /(^|\.)chattokgaming\.com$/i.test(host);
-
-      async function boot(){
-        // Contract:
-        // - ChatTokGaming preview/live provides proto + TikTokClient (do NOT fetch proto.bundle.js here).
-        // - Outside ChatTokGaming, optional local files may exist for dev testing.
-        setStatus("Loading…");
-
-        if (isChatTok){
-          if (!hasGlobal("proto")) throw new Error("Missing global 'proto'. ChatTokGaming must inject proto for TikTokClient deserialization.");
-          if (!hasGlobal("TikTokClient")) throw new Error("Missing global 'TikTokClient'. ChatTokGaming must provide tiktok-client.js.");
-        } else {
-          if (!hasGlobal("proto")) { await loadScript("proto.bundle.js"); }
-          if (!hasGlobal("TikTokClient")) { await loadScript("tiktok-client.js"); }
-          if (!hasGlobal("proto") || !hasGlobal("TikTokClient")) throw new Error("Missing connection libs (proto/TikTokClient).");
-        }
-
-        await loadScript("game.js");
-        setStatus("Ready");
-      }
-
-      boot().catch(function(err){
-        console.error(err);
-        setStatus("Missing connection libs.", false);
-        try{
-          var root = $("gameRoot");
-          if (root){
-            var d = document.createElement("div");
-            d.className = "card";
-            d.style.margin = "12px";
-            d.innerHTML =
-              "<h3>Connection library missing</h3>" +
-              "<p>This game expects ChatTokGaming to provide the connection libraries: <b>proto</b> and <b>TikTokClient</b>.</p>" +
-              "<p class='muted'>If you’re previewing outside ChatTokGaming, these files won’t exist unless you add them manually.</p>";
-            root.appendChild(d);
-          }
-        } catch {}
-      });
-    })();
-  </script>
+  <!-- We no longer auto-fetch proto or tiktok-client here.
+       ChatTokGaming injects them; we simply wait for TikTokClient in game.js on Start. -->
+  <script src="game.js"></script>
 </body>
 </html>

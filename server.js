@@ -1,101 +1,482 @@
-/* server.js — ChatTok Builder API (Render)
-   Goals:
-   - Stable Builder/API contract (no more "Missing prompt/plan" regressions)
-   - Reliable outputs: HTML + CSS are template-based (no LLM corruption)
-   - JS uses template-first + AI_REGION generation w/ timeout + fallback
-   - Correct CORS + preflight
-   - Exactly ONE app.listen()
-*/
+/**
+ * ChatTok Gaming — AI Game Builder API (Render)
+ * Goals:
+ * - Stable builder/API contract (no regressions)
+ * - Deterministic, high-quality template-first generation (HTML/CSS/JS)
+ * - OpenAI used only for plan/spec + optional lightweight edits (cost/timeout safe)
+ * - Robust in iframe/about:srcdoc environments (no fragile relative proto loads)
+ *
+ * NON-NEGOTIABLES:
+ * - DO NOT ship secrets to GitHub Pages
+ * - DO NOT modify tiktok-client.js (platform injected / read-only)
+ * - Must tolerate missing optional fields and never crash
+ */
 
-const express = require("express");
-const cors = require("cors");
-const path = require("path");
-const fs = require("fs");
+"use strict";
+
 require("dotenv").config();
 
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const cors = require("cors");
+
 const app = express();
-app.use(express.json({ limit: "1mb" }));
 
-// ---------------------------
-// 1) CORS (stable + preflight)
-// ---------------------------
-const DEFAULT_ALLOWED = [
-  "https://ogdeig.github.io",
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://localhost:5500",
-  "http://127.0.0.1:3000",
-  "http://127.0.0.1:5173",
-  "http://127.0.0.1:5500",
-];
-
-const allowedOriginsFromEnv = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
-
-const allowedOrigins = Array.from(new Set([...DEFAULT_ALLOWED, ...allowedOriginsFromEnv]));
-
-const corsOptions = {
-  origin: function (origin, cb) {
-    // Allow requests with no origin (curl/health checks/server-to-server)
-    if (!origin) return cb(null, true);
-
-    // If ALLOWED_ORIGINS was intentionally set to "*" allow all.
-    if ((process.env.ALLOWED_ORIGINS || "").trim() === "*") return cb(null, true);
-
-    // Otherwise allow only known origins
-    if (allowedOrigins.includes(origin)) return cb(null, true);
-
-    return cb(new Error("CORS blocked: " + origin));
-  },
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-  optionsSuccessStatus: 204,
-};
-
-app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
-
-// ---------------------------
-// 2) Helpers / config
-// ---------------------------
-const CONTRACT_VERSION = 2;
+// -------------------------------
+// Config
+// -------------------------------
+const HOST = process.env.HOST || "0.0.0.0";
+const PORT = Number(process.env.PORT || 3000);
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_TIMEOUT_MS = Number.parseInt(process.env.OPENAI_TIMEOUT_MS || "35000", 10);
+const OPENAI_MODEL_SPEC = (process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim();
+const OPENAI_MODEL_EDIT = (process.env.OPENAI_MODEL_EDIT || process.env.OPENAI_MODEL_AI || "gpt-4o-mini").trim();
 
-function noStore(res) {
-  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-  res.setHeader("Pragma", "no-cache");
-  res.setHeader("Expires", "0");
-  res.setHeader("Surrogate-Control", "no-store");
+const PLAN_TIMEOUT_MS = Number(process.env.PLAN_TIMEOUT_MS || 18000);
+const EDIT_TIMEOUT_MS = Number(process.env.EDIT_TIMEOUT_MS || 22000);
+
+const MAX_PROMPT_CHARS = Number(process.env.MAX_PROMPT_CHARS || 2500);
+const JSON_LIMIT_BYTES = "1mb";
+
+// Allowlist origins (GitHub Pages + local dev + optional ChatTok)
+const ORIGIN_ALLOWLIST = new Set(
+  (process.env.CORS_ALLOWLIST ||
+    [
+      "https://ogdeig.github.io",
+      "http://localhost:5500",
+      "http://localhost:5173",
+      "http://localhost:3000",
+      "http://127.0.0.1:5500",
+      "http://127.0.0.1:5173",
+      "http://127.0.0.1:3000",
+      "https://chattokgaming.com",
+    ].join(","))
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
+
+// -------------------------------
+// Middleware
+// -------------------------------
+app.set("trust proxy", 1);
+app.disable("x-powered-by");
+
+app.use(express.json({ limit: JSON_LIMIT_BYTES }));
+
+app.use(
+  cors({
+    origin(origin, cb) {
+      // Same-origin / curl / server-side
+      if (!origin) return cb(null, true);
+      if (ORIGIN_ALLOWLIST.has(origin)) return cb(null, true);
+
+      // Allow any localhost port
+      if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) return cb(null, true);
+
+      return cb(new Error("CORS blocked for origin: " + origin), false);
+    },
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: false,
+    maxAge: 86400,
+  })
+);
+
+// Preflight support (Render + GH Pages)
+app.options("*", (_req, res) => res.sendStatus(204));
+
+// No caching on generation endpoints
+app.use((req, res, next) => {
+  if (req.path.startsWith("/api/")) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+    res.setHeader("Surrogate-Control", "no-store");
+  }
+  next();
+});
+
+app.get("/favicon.ico", (_req, res) => res.status(204).end());
+
+// -------------------------------
+// Template loading
+// -------------------------------
+const TEMPLATE_DIR = process.env.TEMPLATE_DIR || process.cwd();
+
+function readFileSafe(p) {
+  return fs.readFileSync(p, "utf8");
 }
 
-function assert(cond, msg) {
-  if (!cond) {
-    const e = new Error(msg || "Assertion failed");
-    e.status = 400;
-    throw e;
+let TEMPLATES = loadTemplates();
+
+function loadTemplates() {
+  const indexPath = path.join(TEMPLATE_DIR, "index.template.html");
+  const cssPath = path.join(TEMPLATE_DIR, "style.template.css");
+  const jsPath = path.join(TEMPLATE_DIR, "game.template.js");
+
+  const indexHtml = readFileSafe(indexPath);
+  const styleCss = readFileSafe(cssPath);
+  const gameJs = readFileSafe(jsPath);
+
+  return { indexHtml, styleCss, gameJs, loadedAt: Date.now() };
+}
+
+app.post("/api/reload-templates", (_req, res) => {
+  try {
+    TEMPLATES = loadTemplates();
+    return res.json({ ok: true, loadedAt: TEMPLATES.loadedAt });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e && e.message ? e.message : e) });
+  }
+});
+
+// -------------------------------
+// Helpers
+// -------------------------------
+function okJson(res, payload) {
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.status(200).send(JSON.stringify(payload));
+}
+
+function badRequest(res, message, extra) {
+  return res.status(400).json({ ok: false, error: message, ...(extra || {}) });
+}
+
+function safeTrim(s, max = 2500) {
+  return String(s || "").trim().replace(/\s+/g, " ").slice(0, max);
+}
+
+function normalizeStage(stage) {
+  const s = String(stage || "").trim().toLowerCase();
+  if (!s) return "";
+  if (["bundle", "all"].includes(s)) return "bundle";
+  if (["html", "index", "index.html", "index_html", "indexhtml"].includes(s)) return "index.html";
+  if (["css", "style", "style.css", "style_css", "stylecss"].includes(s)) return "style.css";
+  if (["js", "game", "game.js", "game_js", "gamejs"].includes(s)) return "game.js";
+  return s;
+}
+
+function pickPrompt(body) {
+  return (
+    body?.prompt ??
+    body?.idea ??
+    body?.text ??
+    body?.gameIdea ??
+    body?.description ??
+    body?.message ??
+    ""
+  );
+}
+
+function pickTheme(body) {
+  const t = body?.theme || body?.colors || body?.palette || {};
+  return {
+    primary: t.primary || t.pink || t.accent || t.primaryColor || "",
+    secondary: t.secondary || t.aqua || t.secondaryColor || "",
+    background: t.background || t.bg || t.backgroundColor || "",
+  };
+}
+
+function validHex(s) {
+  const v = String(s || "").trim();
+  return /^#([0-9a-f]{6}|[0-9a-f]{3})$/i.test(v) ? v : "";
+}
+
+function normalizeTheme(theme) {
+  const primary = validHex(theme.primary) || "#ff0050";
+  const secondary = validHex(theme.secondary) || "#00f2ea";
+  const background = validHex(theme.background) || "#0b0f14";
+  return { primary, secondary, background };
+}
+
+function pickTemplateId(body) {
+  return safeTrim(body?.templateId || body?.template || "default", 48).toLowerCase();
+}
+
+function pickSpec(body) {
+  // Accept many shapes to avoid regressions
+  const direct = body?.spec;
+  const plan = body?.plan;
+  const context = body?.context;
+
+  if (direct && typeof direct === "object") return direct;
+  if (plan && typeof plan === "object") {
+    if (plan.spec && typeof plan.spec === "object") return plan.spec;
+    if (plan.plan && typeof plan.plan === "object" && plan.plan.spec) return plan.plan.spec;
+  }
+  if (context && typeof context === "object") {
+    if (context.spec && typeof context.spec === "object") return context.spec;
+    if (context.plan && typeof context.plan === "object" && context.plan.spec) return context.plan.spec;
+  }
+  return null;
+}
+
+function safeJsonParse(s) {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return null;
   }
 }
 
-function safeStr(v, fallback = "") {
-  const s = typeof v === "string" ? v : v == null ? "" : String(v);
-  return s.trim() ? s : fallback;
+function extractFirstJsonObject(text) {
+  const s = String(text || "").trim();
+  const first = s.indexOf("{");
+  const last = s.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return null;
+  const candidate = s.slice(first, last + 1);
+  return safeJsonParse(candidate);
 }
 
-function clamp(n, min, max) {
-  const x = Number(n);
-  if (!Number.isFinite(x)) return min;
-  return Math.min(max, Math.max(min, x));
+function toSpecFallback(prompt) {
+  const p = safeTrim(prompt, 140);
+  const titleSeed = p.split(/[.!?]/)[0].slice(0, 48).trim() || "ChatTok Live Game";
+  const words = titleSeed.split(/\s+/).filter(Boolean);
+  const title = words.slice(0, 6).join(" ") || "ChatTok Live Game";
+
+  return {
+    title,
+    subtitle: "Live Interactive",
+    oneSentence: "Chat commands control the action. Likes charge power. Gifts trigger big effects.",
+    howToPlay: [
+      "Type !join to enter.",
+      "Type !hit (or any short command) to attack.",
+      "Likes fill the power meter.",
+      "Gifts trigger a special move."
+    ],
+    defaultSettings: { roundSeconds: 30, winGoal: 20 },
+    commands: { join: "!join", action: "!hit", special: "!boost" },
+    visuals: { theme: "neon-dark", vibe: p }
+  };
 }
 
-function stripCodeFences(s) {
-  const t = String(s || "").trim();
-  const m = t.match(/```(?:\w+)?\s*([\s\S]*?)\s*```/);
-  return m ? m[1].trim() : t;
+// -------------------------------
+// OpenAI (plan + optional edit)
+// -------------------------------
+async function callOpenAIChat({ model, messages, max_tokens, temperature, timeoutMs }) {
+  if (!OPENAI_API_KEY) {
+    const err = new Error("OPENAI_API_KEY is not set.");
+    err.code = "NO_API_KEY";
+    throw err;
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), Math.max(2000, timeoutMs || 15000));
+
+  try {
+    const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages,
+        temperature: typeof temperature === "number" ? temperature : 0.7,
+        max_tokens: typeof max_tokens === "number" ? max_tokens : 700,
+        response_format: { type: "json_object" },
+      }),
+    });
+
+    const json = await resp.json().catch(() => null);
+
+    if (!resp.ok) {
+      const msg =
+        (json && (json.error?.message || json.error)) ||
+        `OpenAI error (HTTP ${resp.status})`;
+      const err = new Error(msg);
+      err.status = resp.status;
+      err.payload = json;
+      throw err;
+    }
+
+    const content = json?.choices?.[0]?.message?.content || "";
+    return String(content || "");
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function generateSpecWithOpenAI({ prompt, templateId, theme }) {
+  const p = safeTrim(prompt, MAX_PROMPT_CHARS);
+  const t = normalizeTheme(theme);
+
+  const system = [
+    "You write JSON specs for TikTok Live interactive games.",
+    "Return ONLY valid JSON (no markdown).",
+    "Keep it compact and production-friendly.",
+    "Do NOT include code; only configuration and clear commands.",
+    "Commands must be simple and memorable.",
+  ].join(" ");
+
+  const user = [
+    `PROMPT: ${p}`,
+    `TEMPLATE_ID: ${templateId}`,
+    `THEME: primary=${t.primary}, secondary=${t.secondary}, background=${t.background}`,
+    "",
+    "Output JSON with keys:",
+    "title, subtitle, oneSentence, howToPlay (4-6 strings), defaultSettings ({roundSeconds, winGoal}), commands ({join, action, special}), visuals ({theme, vibe}).",
+    "Constraints:",
+    "- title <= 32 chars if possible",
+    "- howToPlay items <= 70 chars each",
+    "- defaultSettings.roundSeconds between 15 and 60",
+    "- commands must begin with !"
+  ].join("\n");
+
+  const content = await callOpenAIChat({
+    model: OPENAI_MODEL_SPEC,
+    timeoutMs: PLAN_TIMEOUT_MS,
+    max_tokens: 550,
+    temperature: 0.6,
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  });
+
+  const obj = extractFirstJsonObject(content) || safeJsonParse(content);
+  if (!obj || typeof obj !== "object") return null;
+
+  // minimal normalization
+  const spec = {
+    title: safeTrim(obj.title || "ChatTok Live Game", 48),
+    subtitle: safeTrim(obj.subtitle || "Live Interactive", 60),
+    oneSentence: safeTrim(obj.oneSentence || "", 120),
+    howToPlay: Array.isArray(obj.howToPlay) ? obj.howToPlay.map((x) => safeTrim(x, 80)).filter(Boolean).slice(0, 6) : [],
+    defaultSettings: {
+      roundSeconds: Number(obj?.defaultSettings?.roundSeconds || 30),
+      winGoal: Number(obj?.defaultSettings?.winGoal || 20),
+    },
+    commands: {
+      join: safeTrim(obj?.commands?.join || "!join", 18),
+      action: safeTrim(obj?.commands?.action || "!hit", 18),
+      special: safeTrim(obj?.commands?.special || "!boost", 18),
+    },
+    visuals: {
+      theme: safeTrim(obj?.visuals?.theme || "neon-dark", 40),
+      vibe: safeTrim(obj?.visuals?.vibe || "", 220),
+    },
+  };
+
+  spec.defaultSettings.roundSeconds = Math.max(15, Math.min(60, spec.defaultSettings.roundSeconds || 30));
+  spec.defaultSettings.winGoal = Math.max(1, Math.min(999, spec.defaultSettings.winGoal || 20));
+
+  // Guarantee howToPlay
+  if (!spec.howToPlay.length) {
+    spec.howToPlay = toSpecFallback(prompt).howToPlay;
+  }
+
+  // Guarantee commands begin with !
+  for (const k of Object.keys(spec.commands)) {
+    if (!String(spec.commands[k]).startsWith("!")) spec.commands[k] = "!" + normalizeCommand(spec.commands[k]);
+  }
+
+  return spec;
+}
+
+function normalizeCommand(s) {
+  return String(s || "").trim().replace(/^!+/, "").replace(/\s+/g, "").slice(0, 16) || "cmd";
+}
+
+// -------------------------------
+// Template-first generation
+// -------------------------------
+function injectThemeIntoCss(css, theme) {
+  const t = normalizeTheme(theme);
+  let out = String(css || "");
+
+  // Replace ONLY :root vars if present (safe, deterministic).
+  out = out.replace(/(--pink:\s*)#[0-9a-f]{3,6}\s*;/i, `$1${t.primary};`);
+  out = out.replace(/(--aqua:\s*)#[0-9a-f]{3,6}\s*;/i, `$1${t.secondary};`);
+  out = out.replace(/(--bg:\s*)#[0-9a-f]{3,6}\s*;/i, `$1${t.background};`);
+
+  return out;
+}
+
+function injectSpecIntoJs(js, spec) {
+  const s = JSON.stringify(spec || {}, null, 2);
+  return String(js || "").replace("__SPEC_JSON__", s);
+}
+
+function postProcessHtml(html, spec) {
+  // We enforce a safer runtime contract:
+  // - do NOT hard-load proto bundles from relative paths (breaks in iframes)
+  // - do NOT hard-load tiktok-client.js here (platform injects it)
+  // - load game.js after DOM is ready (defer)
+  let out = String(html || "");
+
+  // Ensure stylesheet link exists
+  if (!/href=["']style\.css["']/i.test(out)) {
+    out = out.replace(/<\/head>/i, `  <link rel="stylesheet" href="style.css" />\n</head>`);
+  }
+
+  // Remove brittle runtime script tags (proto + tiktok-client)
+  out = out.replace(/<script[^>]+src=["']https:\/\/cdn\.jsdelivr\.net\/npm\/google-protobuf[^"']+["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']generic\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']unknownobjects\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']data_linkmic_messages\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']proto\.bundle\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']tiktok-client\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+
+  // Remove any existing game.js script tag (we will re-add in a controlled way)
+  out = out.replace(/<script[^>]+src=["']game\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+
+  const boot = `
+<script>
+(function(){
+  function $(id){ return document.getElementById(id); }
+  function setStatus(text){
+    try{
+      var a = $("statusText"), b = $("statusTextInGame"), c = $("statusTextFooter");
+      if (a) a.textContent = text;
+      if (b) b.textContent = text;
+      if (c) c.textContent = text;
+    }catch(e){}
+  }
+
+  // Proto contract (safe default):
+  // - We do NOT request proto bundles here.
+  // - In ChatTokGaming preview/live, platform injects proto + TikTokClient.
+  // - Outside ChatTokGaming, the game still runs in Practice Mode (no connection required).
+  function checkRuntime(){
+    var missing = [];
+    if (typeof window.TikTokClient === "undefined") missing.push("TikTokClient");
+    if (typeof window.proto === "undefined") missing.push("proto");
+    if (missing.length){
+      setStatus("Practice Mode (offline)");
+      // no blocking UI; game.js should still run.
+      console.warn("Missing runtime libs:", missing.join(", "), "(expected outside ChatTokGaming preview/live)");
+    } else {
+      setStatus("Ready");
+    }
+  }
+
+  window.__CHATTOK_SPEC__ = ${JSON.stringify(spec || {}, null, 0)};
+
+  window.addEventListener("DOMContentLoaded", function(){
+    checkRuntime();
+  });
+})();
+</script>`.trim();
+
+  // Insert boot before </body> and add deferred game.js
+  const gameTag = `<script src="game.js" defer></script>`;
+  if (/<\/body>/i.test(out)) {
+    out = out.replace(/<\/body>/i, `${boot}\n${gameTag}\n</body>`);
+  } else {
+    out += `\n${boot}\n${gameTag}\n`;
+  }
+
+  // Inject title if needed
+  if (spec && spec.title && /<title>.*<\/title>/i.test(out)) {
+    out = out.replace(/<title>.*<\/title>/i, `<title>${escapeHtml(spec.title)}</title>`);
+  }
+
+  return out;
 }
 
 function escapeHtml(s) {
@@ -104,813 +485,247 @@ function escapeHtml(s) {
     .replaceAll("<", "&lt;")
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+    .replaceAll("'", "&#39;");
 }
 
-function pickSpecFromReq(body) {
-  const b = body && typeof body === "object" ? body : {};
-  return b.spec || b.plan || (b.context && (b.context.spec || b.context.plan)) || null;
+function buildBundle({ spec, theme }) {
+  const html = postProcessHtml(TEMPLATES.indexHtml, spec);
+  const css = injectThemeIntoCss(TEMPLATES.styleCss, theme);
+  const js = injectSpecIntoJs(TEMPLATES.gameJs, spec);
+
+  // Basic validation (never return empty)
+  if (!String(html || "").trim()) throw new Error("Generated index.html is empty.");
+  if (!String(css || "").trim()) throw new Error("Generated style.css is empty.");
+  if (!String(js || "").trim()) throw new Error("Generated game.js is empty.");
+
+  return { html, css, js };
 }
 
-function pickIdeaFromReq(body) {
-  const b = body && typeof body === "object" ? body : {};
-  return safeStr(b.idea || b.prompt || "");
-}
-
-function normalizeTheme(bodyTheme) {
-  const t = bodyTheme && typeof bodyTheme === "object" ? bodyTheme : {};
-  const primary = safeStr(t.primary, "#ff0050");
-  const secondary = safeStr(t.secondary, "#00f2ea");
-  const background = safeStr(t.background, "#0b0f14");
-
-  // very small validation — keep defaults if invalid
-  const hex6 = /^#[0-9a-fA-F]{6}$/;
-  return {
-    primary: hex6.test(primary) ? primary.toLowerCase() : "#ff0050",
-    secondary: hex6.test(secondary) ? secondary.toLowerCase() : "#00f2ea",
-    background: hex6.test(background) ? background.toLowerCase() : "#0b0f14",
-  };
-}
-
-// ---------------------------
-// 3) Templates (loaded once)
-// ---------------------------
-function resolveTemplatePath(filename) {
-  const base = process.env.TEMPLATE_DIR ? path.resolve(process.env.TEMPLATE_DIR) : path.resolve(__dirname);
-  return path.join(base, filename);
-}
-
-function readTemplate(filename) {
-  const p = resolveTemplatePath(filename);
-  if (!fs.existsSync(p)) {
-    const e = new Error(`Template not found: ${filename} at ${p}`);
-    e.status = 500;
-    throw e;
-  }
-  return fs.readFileSync(p, "utf8");
-}
-
-const TPL = {
-  index: readTemplate("index.template.html"),
-  css: readTemplate("style.template.css"),
-  js: readTemplate("game.template.js"),
-};
-
-// ---------------------------
-// 4) OpenAI (Responses API) + timeout + schema
-// ---------------------------
-function ensureFetch() {
-  if (typeof fetch !== "function") {
-    const e = new Error("Server runtime missing global fetch(). Use Node 18+ on Render.");
-    e.status = 503;
-    throw e;
-  }
-}
-
-function extractOutputText(respJson) {
-  if (!respJson) return "";
-  if (typeof respJson.output_text === "string") return respJson.output_text;
-
-  const out = respJson.output;
-  if (!Array.isArray(out)) return "";
-
-  const parts = [];
-  for (const item of out) {
-    if (!item || item.type !== "message") continue;
-    if (!Array.isArray(item.content)) continue;
-    for (const c of item.content) {
-      if (c && c.type === "output_text" && typeof c.text === "string") parts.push(c.text);
-    }
-  }
-  return parts.join("\n").trim();
-}
-
-async function callOpenAIResponses({ prompt, schema }) {
-  ensureFetch();
-
-  if (!OPENAI_API_KEY) {
-    const e = new Error("OPENAI_API_KEY is missing on the server");
-    e.status = 503;
-    throw e;
-  }
-
-  const endpoint = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1/responses").trim();
-
-  const body = {
-    model: OPENAI_MODEL,
-    store: false,
-    temperature: 0.2,
-    max_output_tokens: 900,
-    input: [{ role: "user", content: String(prompt || "") }],
-  };
-
-  if (schema) {
-    body.text = {
-      format: {
-        type: "json_schema",
-        name: "spec_schema",
-        strict: true,
-        schema,
-      },
-    };
-  }
-
-  const controller = new AbortController();
-  const to = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-
-  let r;
+// -------------------------------
+// API: /api/plan
+// -------------------------------
+app.post("/api/plan", async (req, res) => {
   try {
-    r = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-  } catch (err) {
-    const e = new Error(
-      err && err.name === "AbortError"
-        ? `OpenAI request timed out after ${OPENAI_TIMEOUT_MS}ms`
-        : "OpenAI request failed (network/transport error)"
-    );
-    e.status = err && err.name === "AbortError" ? 504 : 502;
-    e.cause = err;
-    throw e;
-  } finally {
-    clearTimeout(to);
-  }
+    const prompt = safeTrim(pickPrompt(req.body), MAX_PROMPT_CHARS);
+    if (!prompt) return badRequest(res, "Missing prompt");
 
-  let json;
-  try {
-    json = await r.json();
-  } catch (err) {
-    const e = new Error("OpenAI response was not valid JSON");
-    e.status = 502;
-    e.cause = err;
-    throw e;
-  }
+    const templateId = pickTemplateId(req.body);
+    const theme = pickTheme(req.body);
 
-  if (!r.ok) {
-    const e = new Error(json?.error?.message || "OpenAI error");
-    e.status = r.status;
-    e.details = json;
-    throw e;
-  }
+    let spec = null;
 
-  return json;
-}
-
-// ---------------------------
-// 5) Spec generation (plan)
-// ---------------------------
-const SPEC_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    title: { type: "string" },
-    subtitle: { type: "string" },
-    oneSentence: { type: "string" },
-    howToPlay: { type: "array", items: { type: "string" }, minItems: 3, maxItems: 8 },
-    defaultSettings: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        roundSeconds: { type: "number" },
-        winGoal: { type: "number" },
-      },
-      required: ["roundSeconds", "winGoal"],
-    },
-    // optional, helpful for AI_REGION prompts
-    commands: {
-      type: "object",
-      additionalProperties: true,
-      properties: {
-        join: { type: "string" },
-        fire: { type: "string" },
-        boost: { type: "string" },
-      },
-    },
-    visuals: {
-      type: "object",
-      additionalProperties: true,
-      properties: {
-        theme: { type: "string" },
-        vibe: { type: "string" },
-      },
-    },
-  },
-  required: ["title", "subtitle", "oneSentence", "howToPlay", "defaultSettings"],
-};
-
-function fallbackSpecFromIdea(idea, templateId) {
-  const name = safeStr(templateId, "arena");
-  const title = name === "seek" ? "Seek & Destroy" : "ChatTok Live Arena";
-  const subtitle = "Live Interactive";
-  return {
-    title,
-    subtitle,
-    oneSentence: "Chat commands affect the action instantly; likes charge energy; gifts trigger power moves.",
-    howToPlay: [
-      "Type !join to enter the match.",
-      "Type a command (like A4 or !fire A4) to act.",
-      "Likes charge the power meter; gifts trigger special effects.",
-      "Watch the right-side flags for live event feedback.",
-    ],
-    defaultSettings: { roundSeconds: 25, winGoal: 20 },
-    commands: { join: "!join", fire: "!fire A4", boost: "!boost" },
-    visuals: { theme: "neon-dark", vibe: safeStr(idea, "").slice(0, 64) },
-  };
-}
-
-async function generateSpec({ idea, templateId }) {
-  const prompt = [
-    "You are generating a compact game spec for a TikTok LIVE interactive game.",
-    "The game MUST feel alive even without connection (motion, HUD, reactions).",
-    "Keep the spec short and concrete. No essays.",
-    "",
-    `TemplateId: ${safeStr(templateId, "arena")}`,
-    "",
-    "Game idea:",
-    safeStr(idea, "A fun live interactive game."),
-    "",
-    "Return JSON matching the provided schema.",
-  ].join("\n");
-
-  try {
-    const raw = await callOpenAIResponses({ prompt, schema: SPEC_SCHEMA });
-    // With strict schema, the output_text is JSON
-    const txt = extractOutputText(raw);
-    const obj = JSON.parse(txt);
-    // normalize
-    obj.title = safeStr(obj.title, "ChatTok Live Game");
-    obj.subtitle = safeStr(obj.subtitle, "Live Interactive");
-    obj.oneSentence = safeStr(obj.oneSentence, "Chat and gifts power the action.");
-    obj.howToPlay = Array.isArray(obj.howToPlay) ? obj.howToPlay.map((x) => safeStr(x)).filter(Boolean) : [];
-    if (obj.howToPlay.length < 3) obj.howToPlay = fallbackSpecFromIdea(idea, templateId).howToPlay;
-    obj.defaultSettings = obj.defaultSettings || {};
-    obj.defaultSettings.roundSeconds = clamp(obj.defaultSettings.roundSeconds, 5, 300);
-    obj.defaultSettings.winGoal = clamp(obj.defaultSettings.winGoal, 1, 999);
-    return obj;
-  } catch (e) {
-    // Fallback spec must still allow the builder to proceed
-    console.warn("Spec generation failed; using fallback:", e?.message || e);
-    return fallbackSpecFromIdea(idea, templateId);
-  }
-}
-
-// ---------------------------
-// 6) HTML rendering
-// ---------------------------
-function renderHowToLi(spec) {
-  const items = Array.isArray(spec?.howToPlay) ? spec.howToPlay : [];
-  return items
-    .slice(0, 10)
-    .map((x) => `<li>${escapeHtml(String(x || ""))}</li>`)
-    .join("\n");
-}
-
-function renderSettingsFieldsHtml(spec) {
-  const round = clamp(spec?.defaultSettings?.roundSeconds ?? 20, 5, 300);
-  const goal = clamp(spec?.defaultSettings?.winGoal ?? 20, 1, 999);
-
-  return `
-<label class="field">
-  <span class="field-label">Round seconds</span>
-  <input data-setting="roundSeconds" type="number" min="5" max="300" value="${round}" />
-</label>
-
-<label class="field">
-  <span class="field-label">Win goal</span>
-  <input data-setting="winGoal" type="number" min="1" max="999" value="${goal}" />
-</label>
-`.trim();
-}
-
-/**
- * IMPORTANT (platform robustness):
- * The builder only outputs: index.html, style.css, game.js
- * So index.html MUST NOT hard-require proto/generic bundles that aren't shipped.
- * Instead we rely on platform injection (tiktok-client.js + proto) and fail gracefully if missing.
- */
-function normalizeIndexForChatTok(html) {
-  let out = String(html || "");
-
-  // Remove any script tags that reference proto files or tiktok-client.js (since builder doesn't ship them)
-  out = out.replace(/<script[^>]+src="[^"]*(google-protobuf|generic\.js|unknownobjects\.js|data_linkmic_messages\.js|proto\.bundle\.js|tiktok-client\.js)"[^>]*>\s*<\/script>\s*/gi, "");
-
-  // Ensure there is ONLY one game.js include (keep last)
-  // (We'll append a clean include at the bottom.)
-  out = out.replace(/<script[^>]+src="game\.js"[^>]*>\s*<\/script>\s*/gi, "");
-
-  // Add a tiny base-href fix for srcdoc-ish contexts (does nothing on normal hosting)
-  // Note: we cannot guess a correct absolute base; we just avoid crashing and show status.
-  const headClose = out.indexOf("</head>");
-  const injectedHead = `
-  <script>
-    (function(){
-      try{
-        // In some preview iframes (about:srcdoc), relative paths may break.
-        // We can't safely infer a base URL cross-origin, so we just surface a status hint.
-        if (String(location.href||"").startsWith("about:")) {
-          window.__CHATTOK_SRC_DOC__ = true;
-        }
-      }catch(e){}
-    })();
-  </script>
-`.trim();
-
-  if (headClose !== -1) {
-    out = out.slice(0, headClose) + injectedHead + "\n" + out.slice(headClose);
-  } else {
-    out = injectedHead + "\n" + out;
-  }
-
-  // Inject runtime guard (friendly on-screen message if TikTokClient/proto missing)
-  const bodyClose = out.lastIndexOf("</body>");
-  const guard = `
-  <script>
-    (function(){
-      function setStatus(text){
-        try{
-          var a = document.getElementById("statusText");
-          var b = document.getElementById("statusTextInGame");
-          var c = document.getElementById("statusTextFooter");
-          if (a) a.textContent = text;
-          if (b) b.textContent = text;
-          if (c) c.textContent = text;
-        }catch(e){}
-      }
-
-      function showCard(msg){
-        try{
-          var root = document.getElementById("gameRoot");
-          if (!root) return;
-          var d = document.createElement("div");
-          d.className = "card";
-          d.style.maxWidth = "520px";
-          d.innerHTML = "<h3>Runtime missing</h3><div>" + msg + "</div>";
-          root.appendChild(d);
-        }catch(e){}
-      }
-
-      window.addEventListener("DOMContentLoaded", function(){
-        var missing = [];
-        if (typeof TikTokClient === "undefined") missing.push("TikTokClient");
-        if (typeof proto === "undefined") missing.push("proto");
-        if (missing.length){
-          var msg = "Missing: " + missing.join(", ") + ". In ChatTok preview/live these are injected by the platform.";
-          if (window.__CHATTOK_SRC_DOC__) msg += " (Also: running in about:srcdoc can break relative file loads.)";
-          setStatus("Not ready: missing runtime");
-          showCard(msg);
-        } else {
-          setStatus("Ready");
-        }
-      });
-    })();
-  </script>
-  <script src="game.js"></script>
-`.trim();
-
-  if (bodyClose !== -1) {
-    out = out.slice(0, bodyClose) + guard + "\n" + out.slice(bodyClose);
-  } else {
-    out += "\n" + guard + "\n";
-  }
-
-  return out;
-}
-
-function renderIndexHtml(indexTemplate, spec) {
-  let html = String(indexTemplate || "");
-  html = html.replaceAll("{{TITLE}}", escapeHtml(spec.title || "ChatTok Live Game"));
-  html = html.replaceAll("{{SUBTITLE}}", escapeHtml(spec.subtitle || "Live Interactive"));
-  html = html.replaceAll("{{ONE_SENTENCE}}", escapeHtml(spec.oneSentence || ""));
-  html = html.replaceAll("{{HOW_TO_PLAY_LI}}", renderHowToLi(spec));
-  html = html.replaceAll("{{SETTINGS_FIELDS_HTML}}", renderSettingsFieldsHtml(spec));
-  return normalizeIndexForChatTok(html);
-}
-
-// ---------------------------
-// 7) CSS rendering (theme inject only)
-// ---------------------------
-function injectThemeIntoCss(cssTemplate, theme) {
-  let css = String(cssTemplate || "");
-
-  // Replace ONLY the known :root vars
-  css = css.replace(/--pink:\s*#[0-9a-fA-F]{6}\s*;/, `--pink:${theme.primary};`);
-  css = css.replace(/--aqua:\s*#[0-9a-fA-F]{6}\s*;/, `--aqua:${theme.secondary};`);
-  css = css.replace(/--bg:\s*#[0-9a-fA-F]{6}\s*;/, `--bg:${theme.background};`);
-
-  return css;
-}
-
-function validateCss(css) {
-  const c = String(css || "");
-  if (!c.includes(":root")) throw new Error("style.css missing :root block");
-  if (!c.includes("--pink") || !c.includes("--aqua") || !c.includes("--bg")) {
-    throw new Error("style.css missing theme vars (--pink/--aqua/--bg)");
-  }
-  // Guard against the common concatenation corruption
-  if (/flex-direction\s*:\s*body\s*\{/i.test(c)) throw new Error("style.css appears corrupted (concatenation artifact)");
-  return true;
-}
-
-// ---------------------------
-// 8) JS generation (template-first + AI_REGION)
-// ---------------------------
-function replaceBetweenMarkers(fullText, startMarker, endMarker, replacement) {
-  const a = fullText.indexOf(startMarker);
-  const b = fullText.indexOf(endMarker);
-  if (a === -1 || b === -1 || b <= a) throw new Error(`Missing markers: ${startMarker} / ${endMarker}`);
-  const before = fullText.slice(0, a + startMarker.length);
-  const after = fullText.slice(b);
-  return `${before}\n\n${replacement.trim()}\n\n${after}`;
-}
-
-function injectSpecIntoGameJs(jsTemplate, spec) {
-  const json = JSON.stringify(spec, null, 2);
-  return String(jsTemplate || "").replace("__SPEC_JSON__", json);
-}
-
-function fallbackAiRegion() {
-  return `
-function aiInit(ctx){
-  renderBase();
-  renderMeters();
-  ctx.ui.flag({ who:"SYSTEM", msg:"Demo running — go LIVE and connect to play with chat.", pfp:"" });
-  ctx.ui.card("Quick Start", "<p>Type <b>!join</b> in chat. Then fire with <b>A4</b> or <b>!fire A4</b>.</p>");
-}
-
-function aiOnChat(ctx, chat){
-  if (!chat || !chat.text) return;
-  const t = String(chat.text).trim();
-  const low = t.toLowerCase();
-
-  // join
-  if (low === "!join" || low.startsWith("!join ")) {
-    ctx.ui.flag({ who: chat.nickname || "viewer", msg:"joined the match ✅", pfp: chat.pfp || "" });
-    return;
-  }
-
-  // fire coords (A1..J10)
-  const m = t.match(/(?:!fire\\s*)?([A-Ja-j])\\s*(10|[1-9])\\b/);
-  if (m){
-    const coord = (m[1].toUpperCase() + m[2]);
-    const hit = (Math.random() < 0.25);
-    ctx.ui.flag({
-      who: chat.nickname || "viewer",
-      msg: hit ? ("🎯 HIT " + coord + "!") : ("💨 MISS " + coord),
-      pfp: chat.pfp || ""
-    });
-    playFX(hit ? "hit" : "miss");
-    return;
-  }
-
-  // otherwise just echo reaction sometimes
-  if (low.includes("boom") || low.includes("fire") || low.includes("hit")){
-    ctx.ui.flag({ who: chat.nickname || "viewer", msg:"💥", pfp: chat.pfp || "" });
-    playFX("hit");
-  }
-}
-
-function aiOnLike(ctx, like){
-  if ((ctx.state.counters.likes % 50) === 0) {
-    ctx.ui.flag({ who:"SYSTEM", msg:"Likes charged ⚡ Power rising!", pfp:"" });
-  }
-}
-
-function aiOnGift(ctx, gift){
-  const who = gift.nickname || "viewer";
-  ctx.ui.flag({ who, msg:"🎁 Power-up activated!", pfp: gift.pfp || "" });
-  playFX("gift");
-}
-  `.trim();
-}
-
-function sanitizeAiRegion(code) {
-  const c = String(code || "").trim();
-  if (!c) return { ok: false, reason: "empty" };
-
-  const needs = ["function aiInit", "function aiOnChat", "function aiOnLike", "function aiOnGift"];
-  for (const n of needs) {
-    if (!c.includes(n)) return { ok: false, reason: `missing ${n}` };
-  }
-  if (/\brequire\s*\(/.test(c) || /\bimport\s+/.test(c)) return { ok: false, reason: "require/import not allowed" };
-  // Disallow ctx.on usage (common hallucination)
-  if (/\bctx\.on\s*\(/.test(c)) return { ok: false, reason: "ctx.on() not allowed" };
-
-  return { ok: true, code: c };
-}
-
-async function generateAiRegion({ idea, spec, templateId, changeRequest }) {
-  const maxOut = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_JS || 1200);
-
-  const prompt = [
-    "Return ONLY JavaScript code. No markdown. No code fences.",
-    "Generate ONLY the code that goes inside the AI_REGION of game.template.js.",
-    "You MUST define these functions exactly:",
-    "- aiInit(ctx)",
-    "- aiOnChat(ctx, chat)",
-    "- aiOnLike(ctx, like)",
-    "- aiOnGift(ctx, gift)",
-    "",
-    "You may call ONLY these helpers (already defined in the template):",
-    "renderBase(), renderMeters(), playFX(type), ctx.ui.flag({...}), ctx.ui.card(title, html), ctx.ui.setStatus(text, ok)",
-    "",
-    "Hard rules:",
-    "- Do NOT call ctx.on(...). ctx is NOT an event emitter.",
-    "- Do NOT require/import anything.",
-    "- Make gameplay visible even with no TikTok connection (offline demo still shows motion + UI).",
-    "- Handle chat delay gracefully (actions update instantly with flags; no precision timing required).",
-    "",
-    `TemplateId: ${safeStr(templateId, "arena")}`,
-    "",
-    "Spec JSON:",
-    JSON.stringify(spec || {}, null, 2),
-    "",
-    changeRequest ? `Change request:\n${changeRequest}` : `Game idea:\n${safeStr(idea, "")}`,
-  ].join("\n");
-
-  try {
-    ensureFetch();
-    const endpoint = (process.env.OPENAI_BASE_URL || "https://api.openai.com/v1/responses").trim();
-
-    const controller = new AbortController();
-    const to = setTimeout(() => controller.abort(), OPENAI_TIMEOUT_MS);
-
-    let r;
+    // Try OpenAI first, fallback to heuristic spec (never 500).
     try {
-      r = await fetch(endpoint, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: OPENAI_MODEL,
-          store: false,
-          temperature: 0.25,
-          max_output_tokens: maxOut,
-          input: [{ role: "user", content: prompt }],
-        }),
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(to);
+      if (OPENAI_API_KEY) {
+        spec = await generateSpecWithOpenAI({ prompt, templateId, theme });
+      }
+    } catch (e) {
+      console.warn("[plan] OpenAI failed, using fallback:", e && e.message ? e.message : e);
+      spec = null;
     }
 
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const e = new Error(data?.error?.message || "OpenAI request failed");
-      e.status = r.status;
-      throw e;
-    }
+    if (!spec) spec = toSpecFallback(prompt);
 
-    const code = stripCodeFences(extractOutputText(data));
-    const checked = sanitizeAiRegion(code);
-    if (!checked.ok) {
-      console.warn("AI_REGION rejected:", checked.reason);
-      return fallbackAiRegion();
-    }
-    return checked.code;
+    // Return multiple compatible shapes so builder never regresses on parsing:
+    // - spec
+    // - plan.spec
+    // - context.spec
+    return okJson(res, {
+      ok: true,
+      spec,
+      plan: { spec },
+      context: { spec },
+      meta: { templateId },
+    });
   } catch (e) {
-    // timeout / transient errors => safe fallback
-    console.warn("AI_REGION generation failed; using fallback:", e?.message || e);
-    return fallbackAiRegion();
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e && e.message ? e.message : e) });
   }
-}
+});
 
-function validateHtml(html) {
-  const requiredIds = ["setupOverlay", "startGameBtn", "liveIdInput", "gameRoot", "flags"];
-  for (const id of requiredIds) {
-    if (!html.includes(`id="${id}"`) && !html.includes(`id='${id}'`)) {
-      throw new Error(`index.html missing required id: ${id}`);
+// -------------------------------
+// API: /api/generate
+// -------------------------------
+app.post("/api/generate", async (req, res) => {
+  try {
+    const stage = normalizeStage(req.body?.stage);
+    const templateId = pickTemplateId(req.body);
+    const theme = pickTheme(req.body);
+
+    const prompt = safeTrim(pickPrompt(req.body), MAX_PROMPT_CHARS);
+    const spec = pickSpec(req.body) || (prompt ? toSpecFallback(prompt) : null);
+
+    if (!spec) return badRequest(res, "Missing plan/spec (object)", { hint: "Call /api/plan first or include { spec }." });
+
+    const bundle = buildBundle({ spec, theme });
+
+    const files = {
+      indexHtml: bundle.html,
+      styleCss: bundle.css,
+      gameJs: bundle.js,
+    };
+
+    // File-by-file response for builder staging, plus full bundle
+    let file = null;
+    if (stage && stage !== "bundle") {
+      if (stage === "index.html") file = { name: "index.html", content: files.indexHtml };
+      else if (stage === "style.css") file = { name: "style.css", content: files.styleCss };
+      else if (stage === "game.js") file = { name: "game.js", content: files.gameJs };
+      else file = { name: stage, content: "" };
     }
+
+    return okJson(res, {
+      ok: true,
+      stage: stage || "bundle",
+      file,
+      files,
+
+      // Legacy keys (some old builders used these)
+      index_html: files.indexHtml,
+      style_css: files.styleCss,
+      game_js: files.gameJs,
+
+      // Compatibility context
+      spec,
+      plan: { spec },
+      context: { spec, templateId },
+      meta: { templateId },
+    });
+  } catch (e) {
+    console.error(e);
+    const msg = String(e && e.message ? e.message : e);
+    return res.status(500).json({ ok: false, error: msg });
   }
-  const matches = html.match(/id\s*=\s*["']liveIdInput["']/g) || [];
-  if (matches.length !== 1) throw new Error(`index.html must have exactly 1 liveIdInput (found ${matches.length})`);
-}
+});
 
-function validateJs(js) {
-  const s = String(js || "");
-  if (!s.includes("new TikTokClient")) throw new Error("game.js missing TikTokClient usage");
-  if (!s.includes("// === AI_REGION_START ===") || !s.includes("// === AI_REGION_END ===")) {
-    throw new Error("game.js missing AI_REGION markers");
+// -------------------------------
+// API: /api/edit (optional limited edits)
+// -------------------------------
+app.post("/api/edit", async (req, res) => {
+  try {
+    const change = safeTrim(req.body?.prompt || req.body?.change || req.body?.changeRequest || "", 1200);
+    const currentFiles = req.body?.files || req.body?.currentFiles || {};
+    const theme = pickTheme(req.body);
+    const spec = pickSpec(req.body) || req.body?.spec || null;
+
+    const remaining = Number(req.body?.remainingEdits ?? 3);
+    if (remaining <= 0) {
+      return okJson(res, { ok: true, remainingEdits: 0, patches: [], notes: "No edits remaining." });
+    }
+
+    // 1) Theme-only edit (fast, deterministic, zero OpenAI)
+    if (/\b(theme|color|colour|primary|secondary|background|palette)\b/i.test(change)) {
+      const cssBase = String(currentFiles.styleCss || currentFiles["style.css"] || TEMPLATES.styleCss);
+      const css = injectThemeIntoCss(cssBase, theme);
+      return okJson(res, {
+        ok: true,
+        remainingEdits: remaining - 1,
+        patches: [{ name: "style.css", content: css }],
+        notes: "Re-injected theme vars into style.css.",
+      });
+    }
+
+    // 2) If OpenAI is not configured, fallback to rebuilding bundle with updated title/subtitle hints.
+    if (!OPENAI_API_KEY || !spec) {
+      let spec2 = spec || toSpecFallback(change || "ChatTok Live Game");
+      if (change) {
+        // very light heuristic edits
+        if (/title\s*:/i.test(change)) {
+          const m = change.match(/title\s*:\s*(.+)$/im);
+          if (m && m[1]) spec2.title = safeTrim(m[1], 48);
+        }
+      }
+      const bundle = buildBundle({ spec: spec2, theme });
+      return okJson(res, {
+        ok: true,
+        remainingEdits: remaining - 1,
+        patches: [
+          { name: "index.html", content: bundle.html },
+          { name: "style.css", content: bundle.css },
+          { name: "game.js", content: bundle.js },
+        ],
+        notes: "Applied a safe edit by rebuilding from templates (OpenAI not used).",
+        spec: spec2,
+        plan: { spec: spec2 },
+        context: { spec: spec2 },
+      });
+    }
+
+    // 3) OpenAI-assisted edit (compact, hard timeout, with safe fallback)
+    const target = String(req.body?.target || "game.js").toLowerCase();
+    const allowedTargets = new Set(["index.html", "style.css", "game.js"]);
+    const t = allowedTargets.has(target) ? target : "game.js";
+
+    const base =
+      String(
+        currentFiles[t] ||
+          (t === "index.html" ? currentFiles.indexHtml : t === "style.css" ? currentFiles.styleCss : currentFiles.gameJs) ||
+          ""
+      ) || (t === "index.html" ? TEMPLATES.indexHtml : t === "style.css" ? TEMPLATES.styleCss : TEMPLATES.gameJs);
+
+    const sys = [
+      "You are editing a single web file for a TikTok live game.",
+      "Return ONLY the full updated file contents (no markdown).",
+      "Do not introduce new external dependencies.",
+      "Do not reference files that do not exist.",
+      "Keep IDs and selectors consistent with the existing file."
+    ].join(" ");
+
+    const usr = [
+      `EDIT REQUEST: ${safeTrim(change, 1000)}`,
+      `FILE: ${t}`,
+      `SPEC (for context): ${JSON.stringify(spec).slice(0, 1400)}`,
+      "",
+      "CURRENT FILE CONTENTS:",
+      base
+    ].join("\n");
+
+    let updated = null;
+    try {
+      updated = await callOpenAIChat({
+        model: OPENAI_MODEL_EDIT,
+        timeoutMs: EDIT_TIMEOUT_MS,
+        max_tokens: 900,
+        temperature: 0.4,
+        messages: [{ role: "system", content: sys }, { role: "user", content: usr }],
+      });
+    } catch (e) {
+      console.warn("[edit] OpenAI failed, returning unchanged:", e && e.message ? e.message : e);
+      updated = null;
+    }
+
+    const content = String(updated || "").trim() || base;
+
+    // If CSS, re-inject theme to be safe
+    const finalContent = t === "style.css" ? injectThemeIntoCss(content, theme) : content;
+
+    return okJson(res, {
+      ok: true,
+      remainingEdits: remaining - 1,
+      patches: [{ name: t, content: finalContent }],
+      notes: updated ? "Edit applied." : "Edit fallback: unchanged file returned due to timeout/error.",
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ ok: false, error: String(e && e.message ? e.message : e) });
   }
-}
+});
 
-// ---------------------------
-// 9) Endpoints
-// ---------------------------
-
-app.get("/health", (req, res) => {
-  noStore(res);
-  res.json({
+// -------------------------------
+// Health
+// -------------------------------
+app.get("/health", (_req, res) => {
+  res.status(200).json({
     ok: true,
-    status: "ok",
-    contractVersion: CONTRACT_VERSION,
-    model: OPENAI_MODEL,
-    timeoutMs: OPENAI_TIMEOUT_MS,
-    templates: {
-      index: Boolean(TPL.index && TPL.index.length),
-      css: Boolean(TPL.css && TPL.css.length),
-      js: Boolean(TPL.js && TPL.js.length),
-    },
-    now: new Date().toISOString(),
+    ts: Date.now(),
+    templatesLoadedAt: TEMPLATES.loadedAt,
+    hasOpenAIKey: !!OPENAI_API_KEY,
   });
 });
 
-// POST /api/plan
-// Accepts: { idea|prompt, templateId }
-// Returns canonical + backward compatible mirrors:
-// { ok:true, plan:<spec>, spec:<spec>, context:{spec:<spec>} }
-app.post("/api/plan", async (req, res) => {
-  noStore(res);
-  try {
-    const idea = pickIdeaFromReq(req.body);
-    assert(idea, "Missing prompt");
-
-    const templateId = safeStr(req.body?.templateId, "arena");
-    const spec = await generateSpec({ idea, templateId });
-
-    res.json({
-      ok: true,
-      plan: spec,
-      spec,
-      planText: JSON.stringify(spec, null, 2),
-      context: { spec, plan: spec, templateId },
-    });
-  } catch (e) {
-    const status = e.status || 500;
-    res.status(status).json({ ok: false, error: e.message || "Plan failed" });
-  }
-});
-
-// POST /api/generate
-// Accepts: { stage:"html"|"css"|"js", spec|plan|context.spec, idea|prompt, templateId, theme }
-// Returns canonical: { ok:true, file:{name,content}, content:<mirror>, context:{spec,stage} }
-// Also returns optional files mirror for builder backward compatibility.
-app.post("/api/generate", async (req, res) => {
-  noStore(res);
-
-  try {
-    const stage = safeStr(req.body?.stage, "").toLowerCase();
-    assert(stage === "html" || stage === "css" || stage === "js", "Invalid stage");
-
-    const idea = pickIdeaFromReq(req.body) || "(no idea provided)";
-    const templateId = safeStr(req.body?.templateId, "arena");
-    const theme = normalizeTheme(req.body?.theme);
-
-    let spec = pickSpecFromReq(req.body);
-    if (!spec || typeof spec !== "object") {
-      // If builder forgot spec, do NOT 500 — generate a fallback plan so the flow continues.
-      spec = await generateSpec({ idea, templateId });
-    }
-
-    let fileName = "";
-    let content = "";
-
-    if (stage === "html") {
-      fileName = "index.html";
-      content = renderIndexHtml(TPL.index, spec);
-      validateHtml(content);
-    }
-
-    if (stage === "css") {
-      fileName = "style.css";
-      content = injectThemeIntoCss(TPL.css, theme);
-      validateCss(content);
-    }
-
-    if (stage === "js") {
-      fileName = "game.js";
-      const base = injectSpecIntoGameJs(TPL.js, spec);
-      const aiRegion = await generateAiRegion({ idea, spec, templateId, changeRequest: "" });
-      content = replaceBetweenMarkers(base, "// === AI_REGION_START ===", "// === AI_REGION_END ===", aiRegion);
-      validateJs(content);
-    }
-
-    const filesMirror = {
-      indexHtml: stage === "html" ? content : undefined,
-      styleCss: stage === "css" ? content : undefined,
-      gameJs: stage === "js" ? content : undefined,
-    };
-
-    res.json({
-      ok: true,
-      file: { name: fileName, content },
-      content, // mirror
-      files: filesMirror, // compatibility
-      context: { spec, plan: spec, stage, templateId, theme },
-    });
-  } catch (e) {
-    const status = e.status || (String(e?.message || "").includes("timed out") ? 504 : 500);
-    res.status(status).json({
-      ok: false,
-      error: e.message || "Generate failed",
-    });
-  }
-});
-
-// POST /api/edit
-// Accepts:
-// {
-//   remainingEdits:number,
-//   changeRequest:string,
-//   templateId:string,
-//   theme:{...},
-//   currentFiles: { "index.html":string, "style.css":string, "game.js":string }
-// }
-// Returns: { ok:true, patches:[{name,content}], remainingEdits }
-function extractSpecFromGameJs(gameJs) {
-  const js = String(gameJs || "");
-  const m = js.match(/const\s+SPEC\s*=\s*([\s\S]*?);\s*\n/);
-  if (!m) return null;
-  const raw = m[1].trim();
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-app.post("/api/edit", async (req, res) => {
-  noStore(res);
-  try {
-    const remainingEdits = Number(req.body?.remainingEdits ?? 0) || 0;
-    assert(remainingEdits > 0, "No edits remaining");
-
-    const changeRequest = safeStr(req.body?.changeRequest, "");
-    assert(changeRequest, "Missing changeRequest");
-
-    const templateId = safeStr(req.body?.templateId, "arena");
-    const theme = normalizeTheme(req.body?.theme);
-
-    const currentFiles = req.body?.currentFiles && typeof req.body.currentFiles === "object" ? req.body.currentFiles : {};
-    const curHtml = safeStr(currentFiles["index.html"], "");
-    const curCss = safeStr(currentFiles["style.css"], "");
-    const curJs = safeStr(currentFiles["game.js"], "");
-
-    // Spec from current JS if possible, otherwise fallback
-    let spec = extractSpecFromGameJs(curJs);
-    if (!spec) spec = fallbackSpecFromIdea("", templateId);
-
-    const patches = [];
-
-    // If user asks for color/theme changes, safely re-inject CSS vars (no LLM)
-    const wantsTheme =
-      /\bcolor\b|\btheme\b|primary|secondary|background|pink|aqua|neon|dark|light/i.test(changeRequest);
-
-    if (wantsTheme) {
-      const nextCss = injectThemeIntoCss(TPL.css, theme);
-      validateCss(nextCss);
-      patches.push({ name: "style.css", content: nextCss });
-    } else if (curCss) {
-      // preserve current CSS (do not attempt LLM edits to CSS)
-      patches.push({ name: "style.css", content: curCss });
-    }
-
-    // Re-generate AI_REGION for gameplay edits
-    let baseJs;
-    if (curJs && curJs.includes("// === AI_REGION_START ===") && curJs.includes("// === AI_REGION_END ===")) {
-      // keep the current JS shell to avoid regressions
-      baseJs = curJs;
-    } else {
-      baseJs = injectSpecIntoGameJs(TPL.js, spec);
-    }
-
-    const aiRegion = await generateAiRegion({
-      idea: "",
-      spec,
-      templateId,
-      changeRequest,
-    });
-
-    const nextJs = replaceBetweenMarkers(baseJs, "// === AI_REGION_START ===", "// === AI_REGION_END ===", aiRegion);
-    validateJs(nextJs);
-    patches.push({ name: "game.js", content: nextJs });
-
-    // We do not patch index.html in edit (keep stable DOM to avoid regressions)
-    if (curHtml) patches.unshift({ name: "index.html", content: curHtml });
-
-    res.json({
-      ok: true,
-      patches,
-      remainingEdits: remainingEdits - 1,
-      context: { spec, templateId, theme },
-    });
-  } catch (e) {
-    const status = e.status || 500;
-    res.status(status).json({ ok: false, error: e.message || "Edit failed" });
-  }
-});
-
-// ---------------------------
-// 10) One listen() only
-// ---------------------------
-const PORT = Number(process.env.PORT || 3000);
-app.listen(PORT, () => {
-  console.log(`[ChatTok Builder API] listening on :${PORT} (contract v${CONTRACT_VERSION})`);
+// -------------------------------
+// Start
+// -------------------------------
+app.listen(PORT, HOST, () => {
+  console.log(`[chattok-builder-api] listening on http://${HOST}:${PORT}`);
 });

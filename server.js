@@ -1,20 +1,17 @@
 /* =========================================================
    ChatTok Gaming — AI Game Builder API (Render)
    server.js — Production-ready, template-first
-
-   FIXES IN THIS VERSION:
-   ✅ CORS no longer hard-throws (was causing 500s in browser); adds chattokgaming.com to defaults
-   ✅ Preflight handler compatible with Express 4/5 (uses /.*/ instead of "*")
-   ✅ Works on Node runtimes WITHOUT global fetch (adds undici/node-fetch fallback)
-   ✅ Robust SPEC extraction supports BOTH old and new game.template.js patterns
-   ✅ Safer template loading errors (clear messages instead of silent crashes)
-   ✅ Never returns empty files; adds guardrails & clearer failures
+   Key goals:
+   - Stable builder/API contract (/api/plan + /api/generate + /api/edit)
+   - No CSS corruption (CSS is template-only with token injection)
+   - No missing DOM ids (templates are authoritative)
+   - TikTok connection contract preserved (game.js template)
+   - Reliability: OpenAI timeouts + safe fallbacks (never return empty files)
 
    ENV (Render):
    - OPENAI_API_KEY
    - OPENAI_MODEL_SPEC (optional, default gpt-4o-mini)
    - OPENAI_TIMEOUT_MS (optional, default 25000)
-   - OPENAI_MAX_OUTPUT_TOKENS_SPEC (optional)
    - ALLOWED_ORIGINS (optional CSV)
 ========================================================= */
 "use strict";
@@ -23,6 +20,7 @@ const path = require("path");
 const fs = require("fs");
 const express = require("express");
 const cors = require("cors");
+const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 
 const app = express();
@@ -42,14 +40,25 @@ function noStore(_req, res, next) {
 }
 
 // -----------------------------
+// Rate limiting (protect Render)
+// -----------------------------
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 min
+  max: 120,            // 120 req/min per IP
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+app.use("/api/", apiLimiter);
+
+// -----------------------------
 // CORS
 // -----------------------------
 const DEFAULT_ALLOWED = new Set([
-  // Production UI
+  // Your real site(s)
   "https://chattokgaming.com",
   "https://www.chattokgaming.com",
 
-  // GitHub pages / dev
+  // GitHub Pages / dev
   "https://ogdeig.github.io",
   "http://localhost:3000",
   "http://localhost:5173",
@@ -67,27 +76,27 @@ function getAllowedOrigins() {
 
 const allowedOrigins = getAllowedOrigins();
 
-app.use(
-  cors({
-    origin: function (origin, cb) {
-      // Allow non-browser tools (no Origin header)
-      if (!origin) return cb(null, true);
+const corsOptions = {
+  origin: function (origin, cb) {
+    // Allow non-browser tools (no Origin header)
+    if (!origin) return cb(null, true);
 
-      // Explicit allow-list
-      if (allowedOrigins.has(origin)) return cb(null, true);
+    // Allow known origins
+    if (allowedOrigins.has(origin)) return cb(null, true);
 
-      // Do NOT throw (throwing here often becomes a 500 which looks like API failure)
-      return cb(null, false);
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: false,
-    maxAge: 86400,
-  })
-);
+    // IMPORTANT: do NOT throw an Error here (it looks like a server 500).
+    // Returning false causes the browser to block with a clear CORS message.
+    console.warn("CORS blocked origin:", origin);
+    return cb(null, false);
+  },
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
+  credentials: false,
+  maxAge: 86400,
+};
 
-// Preflight (Express 4/5 safe)
-app.options(/.*/, cors());
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 
 // -----------------------------
 // Template loading
@@ -97,12 +106,14 @@ const TPL_DIR = __dirname;
 function readTemplate(file) {
   const p = path.join(TPL_DIR, file);
   if (!fs.existsSync(p)) {
-    const e = new Error(`Template missing: ${file} (looked in ${TPL_DIR})`);
-    e.status = 500;
-    throw e;
+    const err = new Error(`Missing template file: ${file} (expected at ${p})`);
+    err.status = 500;
+    throw err;
   }
   return fs.readFileSync(p, "utf8");
 }
+
+let TEMPLATES = loadTemplates();
 
 function loadTemplates() {
   return {
@@ -110,15 +121,6 @@ function loadTemplates() {
     css: readTemplate("style.template.css"),
     js: readTemplate("game.template.js"),
   };
-}
-
-let TEMPLATES;
-try {
-  TEMPLATES = loadTemplates();
-} catch (e) {
-  console.error("[BOOT] Failed to load templates:", e?.message || e);
-  // Keep running so /health returns something useful, but generation will error clearly.
-  TEMPLATES = { index: "", css: "", js: "" };
 }
 
 // -----------------------------
@@ -131,22 +133,18 @@ function assert(cond, msg) {
     throw e;
   }
 }
-
 function isObj(v) {
   return v && typeof v === "object" && !Array.isArray(v);
 }
-
 function safeStr(v, max = 5000) {
   return String(v || "").replace(/\s+/g, " ").trim().slice(0, max);
 }
-
 function normalizeHex(s) {
   const t = String(s || "").trim();
   if (!t) return "";
   const x = t.startsWith("#") ? t : `#${t}`;
   return /^#[0-9a-fA-F]{6}$/.test(x) ? x.toLowerCase() : "";
 }
-
 function normalizeTheme(themeLike) {
   const th = isObj(themeLike) ? themeLike : {};
   const primary = normalizeHex(th.primary) || "#ff0050";
@@ -154,18 +152,14 @@ function normalizeTheme(themeLike) {
   const background = normalizeHex(th.background) || "#050b17";
   return { primary, secondary, background };
 }
-
 function injectThemeTokens(css, themeLike) {
   const th = normalizeTheme(themeLike);
   let out = String(css || "");
-
   out = out.replaceAll("__THEME_PRIMARY__", th.primary);
   out = out.replaceAll("__THEME_SECONDARY__", th.secondary);
   out = out.replaceAll("__THEME_BACKGROUND__", th.background);
-
   return out;
 }
-
 function escapeHtml(s) {
   return String(s || "")
     .replaceAll("&", "&amp;")
@@ -184,8 +178,6 @@ function renderIndexHtml({ spec, theme }) {
     .join("\n");
 
   let html = String(TEMPLATES.index || "");
-  assert(html && html.length > 50, "index.template.html is empty or missing");
-
   html = html.replaceAll("{{TITLE}}", escapeHtml(safeStr(s.title || "ChatTok Live Game", 80)));
   html = html.replaceAll("{{SUBTITLE}}", escapeHtml(safeStr(s.subtitle || "Live Interactive", 120)));
   html = html.replaceAll(
@@ -197,7 +189,7 @@ function renderIndexHtml({ spec, theme }) {
     howLis || "<li>Type !join to join.</li><li>Type coordinates like A4 to play.</li>"
   );
 
-  // Theme meta (CSS is the real styling)
+  // Theme is applied in CSS; still include as meta tokens for future use
   const th = normalizeTheme(theme);
   html = html.replaceAll("{{THEME_PRIMARY}}", th.primary);
   html = html.replaceAll("{{THEME_SECONDARY}}", th.secondary);
@@ -221,72 +213,15 @@ function stableJson(obj, maxLen = 60000) {
   return s;
 }
 
-/**
- * Extract SPEC JSON from game.js so /api/edit can function.
- * Supports BOTH patterns:
- *  A) old: const SPEC = { ... }; /*__SPEC_END__*\/
- *  B) new: window.__CHATTOK_SPEC__ = { ... }; const SPEC = window.__CHATTOK_SPEC__; /*__SPEC_END__*\/
- */
 function extractSpecFromGameJs(jsText) {
   const s = String(jsText || "");
-
-  // New pattern
-  let m = s.match(
-    /window\.__CHATTOK_SPEC__\s*=\s*({[\s\S]*?})\s*;\s*const\s+SPEC\s*=\s*window\.__CHATTOK_SPEC__\s*;\s*\/\*__SPEC_END__\*\//m
-  );
-  if (m && m[1]) {
-    try {
-      return JSON.parse(m[1]);
-    } catch {
-      // continue
-    }
-  }
-
-  // Old pattern
-  m = s.match(/const\s+SPEC\s*=\s*({[\s\S]*?})\s*;\s*\/\*__SPEC_END__\*\//m);
-  if (m && m[1]) {
-    try {
-      return JSON.parse(m[1]);
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-// -----------------------------
-// Fetch (Node 16/17/18 compatible)
-// -----------------------------
-let _fetch = typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : null;
-
-async function getFetch() {
-  if (_fetch) return _fetch;
-
-  // Try undici (works in many Node 16+ installs)
+  const m = s.match(/const\s+SPEC\s*=\s*({[\s\S]*?})\s*;\s*\/\*__SPEC_END__\*\//);
+  if (!m) return null;
   try {
-    // eslint-disable-next-line global-require
-    const undici = require("undici");
-    if (undici && typeof undici.fetch === "function") {
-      _fetch = undici.fetch.bind(undici);
-      return _fetch;
-    }
-  } catch {}
-
-  // Try node-fetch (v3 is ESM; dynamic import)
-  try {
-    const mod = await import("node-fetch");
-    const f = mod && (mod.default || mod.fetch);
-    if (typeof f === "function") {
-      _fetch = f;
-      return _fetch;
-    }
-  } catch {}
-
-  const e = new Error(
-    "No fetch implementation available. Use Node 18+, or add dependency 'undici' (recommended) or 'node-fetch'."
-  );
-  e.status = 500;
-  throw e;
+    return JSON.parse(m[1]);
+  } catch {
+    return null;
+  }
 }
 
 // -----------------------------
@@ -309,9 +244,7 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt, tim
   };
 
   try {
-    const fetchImpl = await getFetch();
-
-    const r = await fetchImpl("https://api.openai.com/v1/responses", {
+    const r = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       signal: controller.signal,
       headers: {
@@ -325,7 +258,7 @@ async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt, tim
     if (!r.ok) {
       const msg = data?.error?.message || "OpenAI request failed";
       const err = new Error(msg);
-      err.status = r.status || 500;
+      err.status = r.status;
       err.details = data;
       throw err;
     }
@@ -443,17 +376,22 @@ async function editSpecWithOpenAI({ apiKey, model, spec, changeRequest }) {
 // -----------------------------
 // Routes
 // -----------------------------
+const ENDPOINTS = [
+  "GET /health",
+  "GET /api/models",
+  "POST /api/plan",
+  "POST /api/generate",
+  "POST /api/build",
+  "POST /api/edit",
+];
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "chattok-game-builder-api",
     uptimeSec: Math.round(process.uptime()),
     time: new Date().toISOString(),
-    templatesLoaded: {
-      index: !!(TEMPLATES.index && TEMPLATES.index.length > 50),
-      css: !!(TEMPLATES.css && TEMPLATES.css.length > 20),
-      js: !!(TEMPLATES.js && TEMPLATES.js.length > 50),
-    },
+    endpoints: ENDPOINTS,
   });
 });
 
@@ -522,15 +460,8 @@ app.post("/api/plan", noStore, async (req, res) => {
 function buildGameJs({ spec }) {
   const s = isObj(spec) ? spec : fallbackSpecFromIdea("");
   let js = String(TEMPLATES.js || "");
-  assert(js && js.length > 50, "game.template.js is empty or missing");
-
-  assert(js.includes("__SPEC_JSON__"), "game.template.js missing __SPEC_JSON__ placeholder");
-
   const specJson = stableJson(s, 50000);
   js = js.replaceAll("__SPEC_JSON__", specJson);
-
-  // Guard: should never be empty
-  assert(js.trim().length > 100, "Generated game.js is empty");
   return js;
 }
 
@@ -539,8 +470,8 @@ async function generateHandler(req, res) {
     const stage = safeStr(req.body?.stage || "bundle", 20).toLowerCase();
     const templateId = safeStr(req.body?.templateId || req.body?.template || "default", 50).toLowerCase();
     const theme = normalizeTheme(req.body?.theme || req.body?.colors || {});
-
     const prompt = safeStr(req.body?.prompt || req.body?.idea || "");
+
     const ctx = isObj(req.body?.context) ? req.body.context : {};
     const specFromCtx = isObj(ctx.spec) ? ctx.spec : null;
     const specFromTop = isObj(req.body?.spec) ? req.body.spec : null;
@@ -569,46 +500,24 @@ async function generateHandler(req, res) {
     }
 
     if (stage === "css") {
-      const cssTpl = String(TEMPLATES.css || "");
-      assert(cssTpl && cssTpl.length > 20, "style.template.css is empty or missing");
-
-      const css = injectThemeTokens(cssTpl, theme);
+      const css = injectThemeTokens(TEMPLATES.css, theme);
       validateNoPlaceholders(css, "style.css");
-      return res.json({
-        ok: true,
-        stage: "css",
-        file: { name: "style.css", content: css },
-        context: { spec, templateId, theme },
-      });
+      return res.json({ ok: true, stage: "css", file: { name: "style.css", content: css }, context: { spec, templateId } });
     }
 
     if (stage === "html") {
       const html = renderIndexHtml({ spec, theme });
-      return res.json({
-        ok: true,
-        stage: "html",
-        file: { name: "index.html", content: html },
-        context: { spec, templateId, theme },
-      });
+      return res.json({ ok: true, stage: "html", file: { name: "index.html", content: html }, context: { spec, templateId } });
     }
 
     if (stage === "js") {
       const js = buildGameJs({ spec });
-      return res.json({
-        ok: true,
-        stage: "js",
-        file: { name: "game.js", content: js },
-        context: { spec, templateId, theme },
-      });
+      return res.json({ ok: true, stage: "js", file: { name: "game.js", content: js }, context: { spec, templateId } });
     }
 
     const html = renderIndexHtml({ spec, theme });
-
-    const cssTpl = String(TEMPLATES.css || "");
-    assert(cssTpl && cssTpl.length > 20, "style.template.css is empty or missing");
-    const css = injectThemeTokens(cssTpl, theme);
+    const css = injectThemeTokens(TEMPLATES.css, theme);
     validateNoPlaceholders(css, "style.css");
-
     const js = buildGameJs({ spec });
 
     return res.json({
@@ -617,7 +526,7 @@ async function generateHandler(req, res) {
       index_html: html,
       style_css: css,
       game_js: js,
-      context: { spec, templateId, theme },
+      context: { spec, templateId },
     });
   } catch (err) {
     const status = err.status || 500;
@@ -628,7 +537,6 @@ async function generateHandler(req, res) {
   }
 }
 
-// Builder build endpoint(s)
 app.post("/api/generate", noStore, generateHandler);
 app.post("/api/build", noStore, generateHandler);
 
@@ -667,9 +575,7 @@ app.post("/api/edit", noStore, async (req, res) => {
     const patches = [];
     patches.push({ name: "index.html", content: renderIndexHtml({ spec, theme }) });
 
-    const cssTpl = String(TEMPLATES.css || "");
-    assert(cssTpl && cssTpl.length > 20, "style.template.css is empty or missing");
-    const css = injectThemeTokens(cssTpl, theme);
+    const css = injectThemeTokens(TEMPLATES.css, theme);
     validateNoPlaceholders(css, "style.css");
     patches.push({ name: "style.css", content: css });
 
@@ -679,7 +585,7 @@ app.post("/api/edit", noStore, async (req, res) => {
       ok: true,
       patches,
       remainingEdits: Math.max(0, remainingEdits - 1),
-      context: { spec, templateId, theme },
+      context: { spec, templateId },
     });
   } catch (err) {
     const status = err.status || 500;
@@ -688,20 +594,9 @@ app.post("/api/edit", noStore, async (req, res) => {
 });
 
 // -----------------------------
-// Global error hardening (log only)
-// -----------------------------
-process.on("unhandledRejection", (err) => {
-  console.error("[unhandledRejection]", err);
-});
-process.on("uncaughtException", (err) => {
-  console.error("[uncaughtException]", err);
-});
-
-// -----------------------------
 // Startup (exactly one listen)
 // -----------------------------
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`ChatTok Builder API listening on ${PORT}`);
-  console.log("Allowed origins:", Array.from(allowedOrigins).join(", "));
 });

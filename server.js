@@ -65,6 +65,25 @@ const DEFAULT_ALLOWED = new Set([
   "http://localhost:8080",
   "http://127.0.0.1:8080",
 ]);
+function listRoutes(app) {
+  const routes = [];
+  app._router?.stack?.forEach((layer) => {
+    if (layer.route && layer.route.path) {
+      const methods = Object.keys(layer.route.methods || {}).map(m => m.toUpperCase());
+      routes.push({ path: layer.route.path, methods });
+    } else if (layer.name === "router" && layer.handle?.stack) {
+      layer.handle.stack.forEach((l2) => {
+        if (l2.route && l2.route.path) {
+          const methods = Object.keys(l2.route.methods || {}).map(m => m.toUpperCase());
+          routes.push({ path: l2.route.path, methods });
+        }
+      });
+    }
+  });
+  return routes;
+}
+
+console.log("ROUTES:", listRoutes(app));
 
 function getAllowedOrigins() {
   const extra = String(process.env.ALLOWED_ORIGINS || "")

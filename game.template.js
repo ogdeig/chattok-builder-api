@@ -2,12 +2,37 @@
    ChatTok Live Game — game.js (template-first, spec-driven)
    - Uses SPEC JSON injected by server
    - Works in Practice mode without TikTok
-   - Uses TikTokClient + proto when running on ChatTok Gaming platform
+   - LIVE mode uses TikTokClient injected by ChatTok platform
+   - Soft warning overlay if scripts/proto missing (does NOT hard-block)
+   - Uses your working connection pattern (events + token)
    - Keeps required TikTok connection example section (DO NOT REMOVE)
 ========================================================= */
 
 /* Injected spec (do not edit by hand in generated games) */
-const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
+const SPEC = {
+  "title": "Asteroid Assault",
+  "subtitle": "Defend Against the Cosmic Onslaught!",
+  "oneSentence": "Join the fight against asteroid swarms in this interactive chat game on TikTok LIVE.",
+  "howToPlay": [
+    "Type !join to enter the game.",
+    "Use !fire command with a grid position (e.g., !fire A4) to shoot down asteroids."
+  ],
+  "defaultSettings": {
+    "roundSeconds": 30,
+    "winGoal": 20,
+    "gridSize": 10
+  },
+  "commands": {
+    "join": "!join",
+    "fire": "!fire A4"
+  },
+  "visuals": {
+    "hitEmoji": "💥",
+    "missEmoji": "🌊",
+    "scanEmoji": "🔎"
+  },
+  "archetype": "grid-strike"
+}; /*__SPEC_END__*/
 
 (() => {
   "use strict";
@@ -16,6 +41,8 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
   const bootErrorEl = $("bootError");
   const bootErrorText = $("bootErrorText");
+  const bootCloseBtn = $("bootCloseBtn");
+  const bootPracticeBtn = $("bootPracticeBtn");
 
   const setupOverlay = $("setupOverlay");
   const liveIdInput = $("liveIdInput");
@@ -39,17 +66,25 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   const flagsEl = $("flags");
   const flashLayer = $("flashLayer");
 
-  const required = [setupOverlay, liveIdInput, startBtn, practiceBtn, overlayStartBtn, overlayPracticeBtn, statusText, statusTextInGame, canvas, scoreboardEl, flagsEl, flashLayer];
+  const required = [
+    setupOverlay, liveIdInput, startBtn, practiceBtn, overlayStartBtn, overlayPracticeBtn,
+    statusText, statusTextInGame, canvas, scoreboardEl, flagsEl, flashLayer
+  ];
   if (required.some((x) => !x)) {
-    showBootError("Missing required HTML elements. Rebuild the game so index.html matches the template.");
+    console.error("Missing required HTML elements. Ensure index.html matches template.");
     return;
   }
 
   const S = normalizeSpec(SPEC);
 
-  let mode = "idle"; // idle | practice | live
+  // -----------------------------
+  // State
+  // -----------------------------
+  let mode = "idle";        // idle | practice | live
   let connected = false;
-  let client = null;
+
+  let client = null;        // TikTokClient instance
+  let pendingStart = false; // wait for "connected" before starting live game
 
   let round = 1;
   let timeLeft = S.defaultSettings.roundSeconds;
@@ -58,10 +93,10 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   const gridSize = clampInt(S.defaultSettings.gridSize, 6, 14);
   const winGoal = clampInt(S.defaultSettings.winGoal, 5, 999);
 
-  const board = new Array(gridSize * gridSize).fill(0);
+  const board = new Array(gridSize * gridSize).fill(0); // 0 empty, 1 miss, 2 hit, 3 scan
   const targets = new Set();
 
-  const users = new Map();
+  const users = new Map(); // userId -> stats
   let totalShots = 0;
   let totalHits = 0;
 
@@ -69,6 +104,9 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   const ripples = [];
   let likesBank = 0;
 
+  // -----------------------------
+  // UI helpers
+  // -----------------------------
   function setStatus(text) {
     statusText.textContent = text;
     statusTextInGame.textContent = text;
@@ -79,13 +117,28 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   }
 
   function showBootError(message) {
-    try {
-      bootErrorText.innerHTML =
-        escapeHtml(message) +
-        "<div style='margin-top:10px;opacity:.85'>Missing scripts? The platform should inject <code>tiktok-client.js</code> and <code>proto</code>.</div>";
-      bootErrorEl.style.display = "flex";
-    } catch {}
+    if (!bootErrorEl || !bootErrorText) return;
+
+    const body =
+      escapeHtml(message) +
+      "<div style='margin-top:10px;opacity:.88;line-height:1.35'>" +
+      "Missing scripts? The platform should inject <code>tiktok-client.js</code> and <code>proto</code>." +
+      "</div>";
+
+    bootErrorText.innerHTML = body;
+    bootErrorEl.style.display = "flex";
   }
+
+  function hideBootError() {
+    if (!bootErrorEl) return;
+    bootErrorEl.style.display = "none";
+  }
+
+  bootCloseBtn?.addEventListener("click", hideBootError);
+  bootPracticeBtn?.addEventListener("click", () => {
+    hideBootError();
+    startPractice();
+  });
 
   function addFlag({ pfpUrl, line1, line2 }) {
     const el = document.createElement("div");
@@ -137,6 +190,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     const card = document.createElement("div");
     card.className = "scoreCard";
     card.innerHTML = `<div class="scoreTitle">Top Hunters (Hits)</div>`;
+
     for (const u of arr) {
       const row = document.createElement("div");
       row.className = "scoreRow";
@@ -147,9 +201,13 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       `;
       card.appendChild(row);
     }
+
     scoreboardEl.appendChild(card);
   }
 
+  // -----------------------------
+  // Game logic
+  // -----------------------------
   function resetRound() {
     board.fill(0);
     targets.clear();
@@ -203,13 +261,21 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
   function endRound() {
     stopTimer();
-    const best = Array.from(users.values()).sort((a, b) => (b.hits - a.hits) || (b.shots - a.shots))[0];
+
+    const best = Array.from(users.values())
+      .sort((a, b) => (b.hits - a.hits) || (b.shots - a.shots))[0];
+
     if (best && best.hits > 0) {
       flashWinner(best, `wins the round with ${best.hits} hits!`);
     } else {
       flashWinner({ nickname: "No one" }, "No hits this round!");
     }
-    addFlag({ pfpUrl: best?.profilePictureUrl, line1: "Round ended", line2: best ? `${best.nickname} led with ${best.hits}` : "Try again!" });
+
+    addFlag({
+      pfpUrl: best?.profilePictureUrl,
+      line1: "Round ended",
+      line2: best ? `${best.nickname} led with ${best.hits}` : "Try again!"
+    });
 
     setTimeout(() => {
       round += 1;
@@ -222,6 +288,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
   function registerUser(user) {
     if (!user || !user.userId) return null;
+
     if (!users.has(user.userId)) {
       users.set(user.userId, {
         userId: user.userId,
@@ -236,6 +303,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       u.nickname = user.nickname || u.nickname;
       u.profilePictureUrl = user.profilePictureUrl || u.profilePictureUrl;
     }
+
     return users.get(user.userId);
   }
 
@@ -245,6 +313,8 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
     const u = registerUser(user) || { nickname: "Player" };
     const now = Date.now();
+
+    // simple per-user cooldown to reduce spam
     if (u.lastShotAt && now - u.lastShotAt < 1200) return true;
     u.lastShotAt = now;
 
@@ -276,6 +346,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       updateHud();
       endRound();
     }
+
     return true;
   }
 
@@ -301,6 +372,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       }
     }
     if (!candidates.length) return;
+
     const idx = candidates[randInt(0, candidates.length - 1)];
     board[idx] = 3;
 
@@ -322,12 +394,16 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     const candidates = [];
     for (let i = 0; i < board.length; i++) if (board[i] === 0) candidates.push(i);
     if (!candidates.length) return;
+
     const idx = candidates[randInt(0, candidates.length - 1)];
     const r = Math.floor(idx / gridSize);
     const c = idx % gridSize;
     tryFireAt(`${toColLabel(c)}${r + 1}`, u);
   }
 
+  // -----------------------------
+  // Effects & rendering
+  // -----------------------------
   function burstAtCell(col, row, isHit) {
     const p = cellCenter(col, row);
     ripples.push({ x: p.x, y: p.y, t: 0, hit: !!isHit });
@@ -490,15 +566,20 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     }
   }
 
+  // -----------------------------
+  // Input
+  // -----------------------------
   canvas.addEventListener("pointerdown", (ev) => {
     if (mode === "idle") {
       startPractice();
       return;
     }
     if (mode !== "practice") return;
+
     const pt = pointerToCanvas(ev);
     const cell = pointToCell(pt.x, pt.y);
     if (!cell) return;
+
     const fakeUser = { userId: "practice", nickname: "Host", profilePictureUrl: "" };
     tryFireAt(`${toColLabel(cell.col)}${cell.row + 1}`, fakeUser);
   });
@@ -519,6 +600,9 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     return { col, row };
   }
 
+  // -----------------------------
+  // Buttons
+  // -----------------------------
   startBtn.addEventListener("click", startLiveFromUI);
   overlayStartBtn.addEventListener("click", startLiveFromUI);
 
@@ -528,8 +612,16 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   function startPractice() {
     mode = "practice";
     connected = false;
+
+    // If a live client existed, try to close it
+    try {
+      if (client && client.socket) client.socket.close();
+    } catch {}
+
     setStatus("Practice • Tap cells to fire");
     showOverlay(false);
+    hideBootError();
+
     round = 1;
     resetRound();
     startTimer();
@@ -547,166 +639,53 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   async function startLive(liveId) {
     mode = "live";
     connected = false;
+    pendingStart = true;
+
     setStatus("Connecting…");
     showOverlay(false);
 
-    const hasClient = typeof window.TikTokClient === "function" || typeof window.TikTokClient === "object";
-    const hasProto = typeof window.proto === "object" && window.proto;
+    // IMPORTANT: Don’t block if proto is missing; just warn.
+    const hasClient = typeof window.TikTokClient !== "undefined";
+    const hasProto = typeof window.proto !== "undefined" && window.proto;
 
-    if (!hasClient || !hasProto) {
-      showBootError("TikTok scripts were not found. Practice mode still works, but LIVE connect requires the platform to inject the TikTok client + proto bundle.");
-      setStatus("Not connected");
+    if (!hasClient) {
+      pendingStart = false;
+      setStatus("LIVE not available here • Use Practice");
+      showBootError(
+        "TikTok client scripts were not found. Practice mode still works, but LIVE connect requires the platform to inject the TikTok client."
+      );
       return;
     }
 
+    if (!hasProto) {
+      // Soft warning only (some builds bundle internally)
+      showBootError(
+        "Proto bundle was not detected in this preview. LIVE may not work locally. On ChatTok Gaming it is injected automatically."
+      );
+    }
+
     try {
-      client = new window.TikTokClient(liveId, { debug: false });
-      wireClient(client);
-      await client.connect();
-      connected = true;
-      setStatus("LIVE • Connected");
-      round = 1;
-      resetRound();
-      startTimer();
+      setupTikTokClient(liveId);
+      // beginLiveGame() runs on "connected" event.
     } catch (e) {
       console.error(e);
+      pendingStart = false;
       setStatus("Connection failed. Check LIVE ID and try again.");
+      showBootError("Could not start LIVE connection: " + (e && e.message ? e.message : "Unknown error"));
     }
   }
 
-  function wireClient(c) {
-    if (!c || typeof c.on !== "function") return;
+  function beginLiveGame() {
+    connected = true;
+    pendingStart = false;
 
-    c.on("Connected", () => setStatus("LIVE • Connected"));
-    c.on("Disconnected", () => { connected = false; setStatus("Disconnected"); });
+    hideBootError();
+    setStatus("LIVE • Connected");
 
-    c.on("Chat", (msg) => {
-      const text = getChatTextFromMessage(msg);
-      const user = getUserFromMessage(msg);
-      if (!text || !user) return;
-
-      if (normalizeChat(text) === normalizeChat(S.commands.join)) {
-        const u = registerUser(user);
-        addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: "joined the hunt" });
-        return;
-      }
-
-      const did = tryFireAt(text, user);
-      if (did) return;
-
-      addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Chat", line2: text });
-    });
-
-    c.on("Like", (msg) => {
-      const user = getUserFromMessage(msg);
-      const likeCount = msg?.likeCount || msg?.count || 1;
-      onLike(user, likeCount);
-    });
-
-    c.on("Gift", (msg) => {
-      const user = getUserFromMessage(msg);
-      const giftName = msg?.giftName || msg?.gift?.name || "Gift";
-      const repeatCount = msg?.repeatCount || msg?.repeat || 1;
-      onGift(user, giftName, repeatCount);
-    });
-
-    c.on("Member", (msg) => {
-      const user = getUserFromMessage(msg);
-      if (!user) return;
-      addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Viewer", line2: "joined the LIVE" });
-    });
+    round = 1;
+    resetRound();
+    startTimer();
   }
-
-  showOverlay(true);
-  setStatus("Ready. Start LIVE or practice.");
-  resetRound();
-  updateHud();
-  draw();
-
-  function normalizeSpec(spec) {
-    const f = {
-      title: "ChatTok Live Game",
-      subtitle: "Live Interactive",
-      oneSentence: "Connect to TikTok LIVE and let chat control the action.",
-      howToPlay: ["Type !join to join.", "Type coordinates like A4 to fire."],
-      defaultSettings: { roundSeconds: 30, winGoal: 20, gridSize: 10 },
-      commands: { join: "!join", fire: "!fire A4" },
-      visuals: { hitEmoji: "💥", missEmoji: "🌊", scanEmoji: "🔎" },
-      archetype: "grid-strike",
-    };
-    if (spec && typeof spec === "object") {
-      Object.assign(f, spec);
-      if (spec.defaultSettings && typeof spec.defaultSettings === "object") f.defaultSettings = { ...f.defaultSettings, ...spec.defaultSettings };
-      if (spec.commands && typeof spec.commands === "object") f.commands = { ...f.commands, ...spec.commands };
-      if (spec.visuals && typeof spec.visuals === "object") f.visuals = { ...f.visuals, ...spec.visuals };
-      if (!Array.isArray(f.howToPlay)) f.howToPlay = f.howToPlay ? [String(f.howToPlay)] : [];
-    }
-    f.commands.join = String(f.commands.join || "!join").trim();
-    f.commands.fire = String(f.commands.fire || "!fire A4").trim();
-    f.visuals.hitEmoji = String(f.visuals.hitEmoji || "💥");
-    f.visuals.missEmoji = String(f.visuals.missEmoji || "🌊");
-    f.visuals.scanEmoji = String(f.visuals.scanEmoji || "🔎");
-    return f;
-  }
-
-  function parseCoordinate(text, size, firePatternHint) {
-    const t0 = String(text || "").trim();
-    if (!t0) return null;
-
-    const hint = String(firePatternHint || "!fire A4").split(/\s+/)[0].trim();
-    let t = t0;
-    if (hint && normalizeChat(t).startsWith(normalizeChat(hint))) t = t.slice(hint.length).trim();
-
-    const cleaned = t.toUpperCase().replace(/[^A-Z0-9]/g, "");
-    const m = cleaned.match(/^([A-Z])([0-9]{1,2})$/);
-    if (!m) return null;
-
-    const col = m[1].charCodeAt(0) - 65;
-    const row = Number(m[2]) - 1;
-    if (col < 0 || col >= size || row < 0 || row >= size) return null;
-
-    return { col, row, label: `${toColLabel(col)}${row + 1}` };
-  }
-
-  function toColLabel(col) { return String.fromCharCode(65 + col); }
-
-  function formatTime(sec) {
-    const s = clampInt(sec, 0, 9999);
-    const m = Math.floor(s / 60);
-    const r = s % 60;
-    return m > 0 ? `${m}:${String(r).padStart(2, "0")}` : String(r);
-  }
-
-  function clampInt(n, a, b) {
-    const x = Number(n);
-    if (!Number.isFinite(x)) return a;
-    return Math.max(a, Math.min(b, Math.floor(x)));
-  }
-  function clamp01(x) { return Math.max(0, Math.min(1, x)); }
-  function randInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
-
-  function roundRect(ctx, x, y, w, h, r) {
-    const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
-    ctx.beginPath();
-    ctx.moveTo(x + rr, y);
-    ctx.arcTo(x + w, y, x + w, y + h, rr);
-    ctx.arcTo(x + w, y + h, x, y + h, rr);
-    ctx.arcTo(x, y + h, x, y, rr);
-    ctx.arcTo(x, y, x + w, y, rr);
-    ctx.closePath();
-  }
-
-  function escapeHtml(s) {
-    return String(s || "")
-      .replaceAll("&", "&amp;")
-      .replaceAll("<", "&lt;")
-      .replaceAll(">", "&gt;")
-      .replaceAll('"', "&quot;")
-      .replaceAll("'", "&#39;");
-  }
-  function escapeAttr(s) { return escapeHtml(s).replaceAll("`", "&#96;"); }
-
-  function normalizeChat(t) { return String(t || "").trim().toLowerCase(); }
 
   // =========================================================
   // 8. TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
@@ -741,6 +720,252 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   //     const team = userTeams.get(user.userId
   //
   // =========================================================
+
+  // -----------------------------
+  // LIVE: Working connection pattern (your style)
+  // -----------------------------
+  function onChatMessage(data) {
+    try {
+      const msg = data || {};
+      const text = getChatTextFromMessage(msg);
+      const user = getUserFromMessage(msg);
+      if (!text) return;
+
+      // Join
+      if (user && normalizeChat(text) === normalizeChat(S.commands.join)) {
+        const u = registerUser(user);
+        addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: "joined the hunt" });
+        return;
+      }
+
+      // Fire command (or coordinate typed in any reasonable format)
+      if (user) {
+        const did = tryFireAt(text, user);
+        if (did) return;
+      }
+
+      // Otherwise, show chat flag
+      if (user) addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Chat", line2: text });
+    } catch (e) {
+      console.error("Error in chat handler:", e);
+    }
+  }
+
+  function onGiftMessage(data) {
+    try {
+      const msg = data || {};
+      const user = getUserFromMessage(msg);
+      const giftName = msg?.giftName || msg?.gift?.name || msg?.gift?.giftName || "Gift";
+      const repeatCount = msg?.repeatCount || msg?.repeat || msg?.count || 1;
+      if (!user) return;
+      onGift(user, giftName, repeatCount);
+    } catch (e) {
+      console.error("Error in gift handler:", e);
+    }
+  }
+
+  function onLikeMessage(data) {
+    try {
+      const msg = data || {};
+      const user = getUserFromMessage(msg);
+      const likeCount = msg?.likeCount || msg?.count || 1;
+      if (!user) return;
+      onLike(user, likeCount);
+    } catch (e) {
+      console.error("Error in like handler:", e);
+    }
+  }
+
+  function setupTikTokClient(liveId) {
+    if (!liveId) throw new Error("liveId is required");
+
+    // close previous socket safely
+    if (client && client.socket) {
+      try { client.socket.close(); } catch (e) { console.warn("Error closing previous socket:", e); }
+    }
+
+    if (typeof TikTokClient === "undefined") {
+      throw new Error("TikTokClient is not available. Check tiktok-client.js.");
+    }
+
+    client = new TikTokClient(liveId);
+
+    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
+    if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
+      try { client.setAccessToken(CHATTOK_CREATOR_TOKEN); } catch {}
+    }
+
+    // Event names vary by build; register both lower + upper where applicable
+    const on = (evt, fn) => {
+      try { client.on(evt, fn); } catch {}
+    };
+
+    on("connected", () => {
+      console.log("Connected to TikTok hub.");
+      if (!connected && pendingStart) beginLiveGame();
+      else setStatus("LIVE • Connected");
+    });
+
+    on("Connected", () => {
+      console.log("Connected to TikTok hub (Connected).");
+      if (!connected && pendingStart) beginLiveGame();
+      else setStatus("LIVE • Connected");
+    });
+
+    on("disconnected", (reason) => {
+      console.log("Disconnected from TikTok hub:", reason);
+      connected = false;
+      const msg = reason || "Connection closed";
+      setStatus("Disconnected: " + msg);
+      if (!connected) pendingStart = false;
+    });
+
+    on("Disconnected", (reason) => {
+      console.log("Disconnected from TikTok hub (Disconnected):", reason);
+      connected = false;
+      const msg = reason || "Connection closed";
+      setStatus("Disconnected: " + msg);
+      if (!connected) pendingStart = false;
+    });
+
+    on("error", (err) => {
+      console.error("TikTok client error:", err);
+      const msg = (err && err.message) ? err.message : "Unknown";
+      setStatus("Error: " + msg);
+      pendingStart = false;
+    });
+
+    on("Error", (err) => {
+      console.error("TikTok client error (Error):", err);
+      const msg = (err && err.message) ? err.message : "Unknown";
+      setStatus("Error: " + msg);
+      pendingStart = false;
+    });
+
+    // message streams
+    on("chat", onChatMessage);
+    on("Chat", onChatMessage);
+
+    on("gift", onGiftMessage);
+    on("Gift", onGiftMessage);
+
+    on("like", onLikeMessage);
+    on("Like", onLikeMessage);
+
+    on("member", (data) => {
+      const user = getUserFromMessage(data);
+      if (!user) return;
+      addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Viewer", line2: "joined the LIVE" });
+    });
+    on("Member", (data) => {
+      const user = getUserFromMessage(data);
+      if (!user) return;
+      addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Viewer", line2: "joined the LIVE" });
+    });
+
+    client.connect();
+  }
+
+  // -----------------------------
+  // Boot
+  // -----------------------------
+  showOverlay(true);
+  setStatus("Ready. Start LIVE or practice.");
+  resetRound();
+  updateHud();
+  draw();
+
+  // -----------------------------
+  // Spec + parsing helpers
+  // -----------------------------
+  function normalizeSpec(spec) {
+    const f = {
+      title: "ChatTok Live Game",
+      subtitle: "Live Interactive",
+      oneSentence: "Connect to TikTok LIVE and let chat control the action.",
+      howToPlay: ["Type !join to join.", "Type coordinates like A4 to fire."],
+      defaultSettings: { roundSeconds: 30, winGoal: 20, gridSize: 10 },
+      commands: { join: "!join", fire: "!fire A4" },
+      visuals: { hitEmoji: "💥", missEmoji: "🌊", scanEmoji: "🔎" },
+      archetype: "grid-strike",
+    };
+
+    if (spec && typeof spec === "object") {
+      Object.assign(f, spec);
+      if (spec.defaultSettings && typeof spec.defaultSettings === "object") f.defaultSettings = { ...f.defaultSettings, ...spec.defaultSettings };
+      if (spec.commands && typeof spec.commands === "object") f.commands = { ...f.commands, ...spec.commands };
+      if (spec.visuals && typeof spec.visuals === "object") f.visuals = { ...f.visuals, ...spec.visuals };
+      if (!Array.isArray(f.howToPlay)) f.howToPlay = f.howToPlay ? [String(f.howToPlay)] : [];
+    }
+
+    f.commands.join = String(f.commands.join || "!join").trim();
+    f.commands.fire = String(f.commands.fire || "!fire A4").trim();
+    f.visuals.hitEmoji = String(f.visuals.hitEmoji || "💥");
+    f.visuals.missEmoji = String(f.visuals.missEmoji || "🌊");
+    f.visuals.scanEmoji = String(f.visuals.scanEmoji || "🔎");
+    return f;
+  }
+
+  function parseCoordinate(text, size, firePatternHint) {
+    const t0 = String(text || "").trim();
+    if (!t0) return null;
+
+    // allow "!fire A4" style; remove the "!fire" part if present
+    const hint = String(firePatternHint || "!fire A4").split(/\s+/)[0].trim();
+    let t = t0;
+    if (hint && normalizeChat(t).startsWith(normalizeChat(hint))) t = t.slice(hint.length).trim();
+
+    // accept "A4", "a-4", "A 4", etc.
+    const cleaned = t.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const m = cleaned.match(/^([A-Z])([0-9]{1,2})$/);
+    if (!m) return null;
+
+    const col = m[1].charCodeAt(0) - 65;
+    const row = Number(m[2]) - 1;
+    if (col < 0 || col >= size || row < 0 || row >= size) return null;
+
+    return { col, row, label: `${toColLabel(col)}${row + 1}` };
+  }
+
+  function toColLabel(col) { return String.fromCharCode(65 + col); }
+
+  function formatTime(sec) {
+    const s = clampInt(sec, 0, 9999);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return m > 0 ? `${m}:${String(r).padStart(2, "0")}` : String(r);
+  }
+
+  function clampInt(n, a, b) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return a;
+    return Math.max(a, Math.min(b, Math.floor(x)));
+  }
+  function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+  function randInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
+
+  function roundRect(ctx2, x, y, w, h, r) {
+    const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+    ctx2.beginPath();
+    ctx2.moveTo(x + rr, y);
+    ctx2.arcTo(x + w, y, x + w, y + h, rr);
+    ctx2.arcTo(x + w, y + h, x, y + h, rr);
+    ctx2.arcTo(x, y + h, x, y, rr);
+    ctx2.arcTo(x, y, x + w, y, rr);
+    ctx2.closePath();
+  }
+
+  function escapeHtml(s) {
+    return String(s || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+  function escapeAttr(s) { return escapeHtml(s).replaceAll("`", "&#96;"); }
+
+  function normalizeChat(t) { return String(t || "").trim().toLowerCase(); }
 
   function getChatTextFromMessage(msg) {
     return (msg?.comment || msg?.text || msg?.message || msg?.content || "").toString();

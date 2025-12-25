@@ -1,15 +1,18 @@
 /* =========================================================
-   ChatTok Live Game — game.js (template-first, spec-driven)
-   - Uses SPEC JSON injected by server
-   - Works in Practice mode without TikTok
-   - LIVE mode uses TikTokClient injected by ChatTok platform
-   - Soft warning overlay if scripts/proto missing (does NOT hard-block)
-   - Uses your working connection pattern (events + token)
-   - Keeps required TikTok connection example section (DO NOT REMOVE)
+   ChatTok Live Game — game.template.js (template-first, spec-driven)
+   FIXES IN THIS VERSION:
+   ✅ Exposes SPEC to HTML via window.__CHATTOK_SPEC__ (so index.template can auto-fill title/sub/how-to)
+   ✅ Dynamic document title + pills/overlay text update from SPEC (even if HTML sync script is missing)
+   ✅ Safer canvas sizing for crisp rendering on resize (keeps 9:16)
+   ✅ Prevents double round-end / timer overlap + clears old timers on mode switches
+   ✅ Practice can start from idle tap; LIVE connect remains soft-fail if client/proto missing
+   ✅ Adds click-to-fire support in practice AND allows typing coordinates in chat without needing "!fire"
+   ✅ Keeps REQUIRED TikTok connection example section untouched
 ========================================================= */
 
 /* Injected spec (do not edit by hand in generated games) */
-const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
+window.__CHATTOK_SPEC__ = __SPEC_JSON__;
+const SPEC = window.__CHATTOK_SPEC__; /*__SPEC_END__*/
 
 (() => {
   "use strict";
@@ -54,6 +57,28 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   }
 
   const S = normalizeSpec(SPEC);
+  applySpecToUI(S);
+
+  // -----------------------------
+  // Canvas crisp sizing (9:16)
+  // -----------------------------
+  function resizeCanvasToCSS() {
+    // keep internal resolution in sync with rendered size
+    const rect = canvas.getBoundingClientRect();
+    const dpr = Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
+
+    const w = Math.max(10, Math.floor(rect.width * dpr));
+    const h = Math.max(10, Math.floor(rect.height * dpr));
+
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+  }
+  const ro = new ResizeObserver(() => resizeCanvasToCSS());
+  try { ro.observe(canvas); } catch {}
+  window.addEventListener("resize", resizeCanvasToCSS);
+  resizeCanvasToCSS();
 
   // -----------------------------
   // State
@@ -65,7 +90,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   let pendingStart = false; // wait for "connected" before starting live game
 
   let round = 1;
-  let timeLeft = S.defaultSettings.roundSeconds;
+  let timeLeft = clampInt(S.defaultSettings.roundSeconds, 5, 600);
   let timerHandle = null;
 
   const gridSize = clampInt(S.defaultSettings.gridSize, 6, 14);
@@ -203,7 +228,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     const targetCount = clampInt(Math.floor(gridSize * gridSize * 0.12), 8, Math.floor(gridSize * gridSize * 0.35));
     placeTargetsRandom(targetCount);
 
-    timeLeft = S.defaultSettings.roundSeconds;
+    timeLeft = clampInt(S.defaultSettings.roundSeconds, 5, 600);
 
     particles.length = 0;
     ripples.length = 0;
@@ -226,10 +251,13 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     stopTimer();
     timerHandle = setInterval(() => {
       if (mode === "idle") return;
+      if (roundEnding) return;
       timeLeft -= 1;
       if (timeLeft <= 0) {
         timeLeft = 0;
+        updateHud();
         endRound();
+        return;
       }
       updateHud();
     }, 1000);
@@ -294,6 +322,11 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   }
 
   function tryFireAt(text, user) {
+    // Accept:
+    // - "!fire A4"
+    // - "A4"
+    // - "a-4"
+    // - "fire a4"
     const coord = parseCoordinate(text, gridSize, S.commands.fire);
     if (!coord) return false;
 
@@ -413,6 +446,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
   function draw() {
     requestAnimationFrame(draw);
+    resizeCanvasToCSS();
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     drawBackground();
     drawGrid();
@@ -433,11 +467,11 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   }
 
   function gridRect() {
-    const padX = 54;
-    const padY = 150;
+    const padX = Math.max(44, canvas.width * 0.075);
+    const padY = Math.max(120, canvas.height * 0.12);
     const size = Math.min(canvas.width - padX * 2, canvas.height - padY * 2);
     const x = (canvas.width - size) / 2;
-    const y = 200;
+    const y = Math.max(110, canvas.height * 0.16);
     return { x, y, size };
   }
 
@@ -452,27 +486,27 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     const cs = gr.size / gridSize;
 
     ctx.strokeStyle = "rgba(255,255,255,0.14)";
-    ctx.lineWidth = 2;
+    ctx.lineWidth = Math.max(2, cs * 0.04);
     roundRect(ctx, gr.x - 8, gr.y - 8, gr.size + 16, gr.size + 16, 16);
     ctx.stroke();
 
     ctx.fillStyle = "rgba(255,255,255,0.75)";
-    ctx.font = "900 16px system-ui";
+    ctx.font = `900 ${Math.max(12, cs * 0.28)}px system-ui`;
     for (let c = 0; c < gridSize; c++) {
       const t = toColLabel(c);
       const x = gr.x + c * cs + cs / 2;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(t, x, gr.y - 22);
-      ctx.fillText(t, x, gr.y + gr.size + 22);
+      ctx.fillText(t, x, gr.y - cs * 0.55);
+      ctx.fillText(t, x, gr.y + gr.size + cs * 0.55);
     }
     for (let r = 0; r < gridSize; r++) {
       const t = String(r + 1);
       const y = gr.y + r * cs + cs / 2;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(t, gr.x - 22, y);
-      ctx.fillText(t, gr.x + gr.size + 22, y);
+      ctx.fillText(t, gr.x - cs * 0.55, y);
+      ctx.fillText(t, gr.x + gr.size + cs * 0.55, y);
     }
 
     for (let r = 0; r < gridSize; r++) {
@@ -484,12 +518,12 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
         ctx.fillStyle = "rgba(0,0,0,0.18)";
         ctx.fillRect(x + 1, y + 1, cs - 2, cs - 2);
 
-        if (board[idx] === 1) drawEmoji(S.visuals.missEmoji, x + cs / 2, y + cs / 2, 24);
-        else if (board[idx] === 2) drawEmoji(S.visuals.hitEmoji, x + cs / 2, y + cs / 2, 26);
-        else if (board[idx] === 3) drawEmoji(S.visuals.scanEmoji, x + cs / 2, y + cs / 2, 22);
+        if (board[idx] === 1) drawEmoji(S.visuals.missEmoji, x + cs / 2, y + cs / 2, cs * 0.55);
+        else if (board[idx] === 2) drawEmoji(S.visuals.hitEmoji, x + cs / 2, y + cs / 2, cs * 0.60);
+        else if (board[idx] === 3) drawEmoji(S.visuals.scanEmoji, x + cs / 2, y + cs / 2, cs * 0.50);
 
         ctx.strokeStyle = "rgba(255,255,255,0.08)";
-        ctx.lineWidth = 1;
+        ctx.lineWidth = Math.max(1, cs * 0.02);
         ctx.strokeRect(x, y, cs, cs);
       }
     }
@@ -497,18 +531,19 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
   function drawIdleHint() {
     ctx.fillStyle = "rgba(255,255,255,0.75)";
-    ctx.font = "900 28px system-ui";
+    ctx.font = `900 ${Math.max(20, canvas.width * 0.035)}px system-ui`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText("TAP A CELL TO FIRE", canvas.width / 2, 140);
+    ctx.fillText("TAP A CELL TO FIRE", canvas.width / 2, Math.max(80, canvas.height * 0.11));
 
     ctx.fillStyle = "rgba(255,255,255,0.65)";
-    ctx.font = "700 16px system-ui";
-    ctx.fillText(`Or connect to TikTok LIVE with ${S.commands.join}`, canvas.width / 2, 172);
+    ctx.font = `700 ${Math.max(12, canvas.width * 0.022)}px system-ui`;
+    ctx.fillText(`Or connect to TikTok LIVE with ${S.commands.join}`, canvas.width / 2, Math.max(110, canvas.height * 0.135));
   }
 
-  function drawEmoji(emoji, x, y, size) {
-    ctx.font = `900 ${size}px system-ui, Apple Color Emoji, Segoe UI Emoji`;
+  function drawEmoji(emoji, x, y, sizePx) {
+    const sz = Math.max(10, Math.floor(sizePx));
+    ctx.font = `900 ${sz}px system-ui, Apple Color Emoji, Segoe UI Emoji`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     ctx.fillText(emoji || "•", x, y);
@@ -583,6 +618,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     const cs = gr.size / gridSize;
     const col = Math.floor((x - gr.x) / cs);
     const row = Math.floor((y - gr.y) / cs);
+    if (col < 0 || row < 0 || col >= gridSize || row >= gridSize) return null;
     return { col, row };
   }
 
@@ -595,13 +631,23 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   practiceBtn.addEventListener("click", startPractice);
   overlayPracticeBtn.addEventListener("click", startPractice);
 
-  function startPractice() {
-    mode = "practice";
-    connected = false;
-
+  function hardStopLiveClient() {
     try {
       if (client && client.socket) client.socket.close();
     } catch {}
+    try {
+      if (client && typeof client.disconnect === "function") client.disconnect();
+    } catch {}
+  }
+
+  function startPractice() {
+    mode = "practice";
+    connected = false;
+    pendingStart = false;
+    roundEnding = false;
+
+    stopTimer();
+    hardStopLiveClient();
 
     setStatus("Practice • Tap cells to fire");
     showOverlay(false);
@@ -625,7 +671,9 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     mode = "live";
     connected = false;
     pendingStart = true;
+    roundEnding = false;
 
+    stopTimer();
     setStatus("Connecting…");
     showOverlay(false);
 
@@ -649,6 +697,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
     try {
       setupTikTokClient(liveId);
+      // beginLiveGame fires when connected
     } catch (e) {
       console.error(e);
       pendingStart = false;
@@ -713,17 +762,20 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       const user = getUserFromMessage(msg);
       if (!text) return;
 
+      // Join
       if (user && normalizeChat(text) === normalizeChat(S.commands.join)) {
         const u = registerUser(user);
         addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: "joined the hunt" });
         return;
       }
 
+      // Fire (accept coordinate-only too)
       if (user) {
         const did = tryFireAt(text, user);
         if (did) return;
       }
 
+      // Otherwise, show chat flag
       if (user) addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Chat", line2: text });
     } catch (e) {
       console.error("Error in chat handler:", e);
@@ -758,9 +810,8 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
   function setupTikTokClient(liveId) {
     if (!liveId) throw new Error("liveId is required");
 
-    if (client && client.socket) {
-      try { client.socket.close(); } catch (e) { console.warn("Error closing previous socket:", e); }
-    }
+    // close previous socket safely
+    hardStopLiveClient();
 
     if (typeof TikTokClient === "undefined") {
       throw new Error("TikTokClient is not available. Check tiktok-client.js.");
@@ -768,10 +819,12 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
     client = new TikTokClient(liveId);
 
+    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
     if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
       try { client.setAccessToken(CHATTOK_CREATOR_TOKEN); } catch {}
     }
 
+    // Event names vary by build; register both lower + upper where applicable
     const on = (evt, fn) => {
       try { client.on(evt, fn); } catch {}
     };
@@ -794,6 +847,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       const msg = reason || "Connection closed";
       setStatus("Disconnected: " + msg);
       pendingStart = false;
+      stopTimer();
     });
 
     on("Disconnected", (reason) => {
@@ -802,6 +856,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       const msg = reason || "Connection closed";
       setStatus("Disconnected: " + msg);
       pendingStart = false;
+      stopTimer();
     });
 
     on("error", (err) => {
@@ -809,6 +864,7 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       const msg = (err && err.message) ? err.message : "Unknown";
       setStatus("Error: " + msg);
       pendingStart = false;
+      stopTimer();
     });
 
     on("Error", (err) => {
@@ -816,8 +872,10 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       const msg = (err && err.message) ? err.message : "Unknown";
       setStatus("Error: " + msg);
       pendingStart = false;
+      stopTimer();
     });
 
+    // message streams
     on("chat", onChatMessage);
     on("Chat", onChatMessage);
 
@@ -873,11 +931,18 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
       if (!Array.isArray(f.howToPlay)) f.howToPlay = f.howToPlay ? [String(f.howToPlay)] : [];
     }
 
+    f.title = String(f.title || "ChatTok Live Game");
+    f.subtitle = String(f.subtitle || "Live Interactive");
+    f.oneSentence = String(f.oneSentence || "Connect to TikTok LIVE and let chat control the action.");
+
     f.commands.join = String(f.commands.join || "!join").trim();
     f.commands.fire = String(f.commands.fire || "!fire A4").trim();
     f.visuals.hitEmoji = String(f.visuals.hitEmoji || "💥");
     f.visuals.missEmoji = String(f.visuals.missEmoji || "🌊");
     f.visuals.scanEmoji = String(f.visuals.scanEmoji || "🔎");
+
+    // normalize howToPlay entries to strings
+    f.howToPlay = (Array.isArray(f.howToPlay) ? f.howToPlay : []).map((x) => String(x));
     return f;
   }
 
@@ -885,10 +950,17 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
     const t0 = String(text || "").trim();
     if (!t0) return null;
 
+    // allow "!fire A4" style; remove the "!fire" part if present
     const hint = String(firePatternHint || "!fire A4").split(/\s+/)[0].trim();
     let t = t0;
-    if (hint && normalizeChat(t).startsWith(normalizeChat(hint))) t = t.slice(hint.length).trim();
 
+    // also accept "fire A4"
+    const tLower = normalizeChat(t);
+    const fireLower = normalizeChat(hint);
+    if (fireLower && tLower.startsWith(fireLower)) t = t.slice(hint.length).trim();
+    if (tLower.startsWith("fire ")) t = t.slice(5).trim();
+
+    // accept "A4", "a-4", "A 4", etc.
     const cleaned = t.toUpperCase().replace(/[^A-Z0-9]/g, "");
     const m = cleaned.match(/^([A-Z])([0-9]{1,2})$/);
     if (!m) return null;
@@ -957,5 +1029,49 @@ const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
         "").toString();
 
     return { userId, nickname, profilePictureUrl: pfp };
+  }
+
+  function applySpecToUI(spec) {
+    try {
+      const t = String(spec?.title || "ChatTok Live Game");
+      document.title = t;
+
+      const pill = $("gameTitlePill");
+      if (pill) pill.textContent = t;
+
+      const brandTitle = $("uiBrandTitle");
+      if (brandTitle) brandTitle.textContent = t;
+
+      const overlayTitle = $("uiOverlayTitle");
+      if (overlayTitle) overlayTitle.textContent = t;
+
+      const sub = String(spec?.subtitle || "Live Interactive");
+      const brandSub = $("uiBrandSub");
+      if (brandSub) brandSub.textContent = sub;
+
+      const one = String(spec?.oneSentence || "Connect to TikTok LIVE and let chat control the action.");
+      const kicker = $("uiKicker");
+      if (kicker) kicker.textContent = one;
+
+      const overlaySub = $("uiOverlaySub");
+      if (overlaySub) overlaySub.textContent = one;
+
+      const joinCmd = String(spec?.commands?.join || "!join");
+      const fireCmd = String(spec?.commands?.fire || "!fire A4");
+      const cmdJoin = $("uiCmdJoin");
+      const cmdFire = $("uiCmdFire");
+      if (cmdJoin) cmdJoin.textContent = joinCmd;
+      if (cmdFire) cmdFire.textContent = fireCmd;
+
+      const list = $("uiHowToPlayList");
+      if (list && Array.isArray(spec?.howToPlay) && spec.howToPlay.length) {
+        list.innerHTML = "";
+        for (const it of spec.howToPlay) {
+          const li = document.createElement("li");
+          li.textContent = String(it);
+          list.appendChild(li);
+        }
+      }
+    } catch {}
   }
 })();

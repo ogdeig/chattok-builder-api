@@ -1,322 +1,320 @@
 /* =========================================================
-   ChatTok Game Template — style.template.css
-   - 9:16 friendly, mobile readable
-   - Clean overlay + game screen
-   - Optional right-side flags (if used)
-   - Theme variables injected by API:
-     __THEME_PRIMARY__, __THEME_SECONDARY__, __THEME_BACKGROUND__
+   ChatTok Live Game — style.css (template)
+   Theme tokens injected by server:
+     __THEME_PRIMARY__   __THEME_SECONDARY__   __THEME_BACKGROUND__
 ========================================================= */
 
 :root{
-  --bg0: __THEME_BACKGROUND__;
-  --bg1: rgba(255,255,255,.06);
-  --bg2: rgba(255,255,255,.04);
-  --line: rgba(255,255,255,.12);
-
-  --text: rgba(255,255,255,.96);
-  --muted: rgba(255,255,255,.72);
-
-  /* brand defaults */
   --pink: __THEME_PRIMARY__;
   --aqua: __THEME_SECONDARY__;
+  --bg0: __THEME_BACKGROUND__;
+  --bg1: #071a35;
 
-  --good: #2ee59d;
-  --bad: #ff4d4d;
-  --warn: #ffcc66;
+  --panel: rgba(255,255,255,.06);
+  --panel2: rgba(255,255,255,.04);
+  --line: rgba(255,255,255,.10);
 
-  --shadow: 0 18px 60px rgba(0,0,0,.55);
-  --shadow2: 0 10px 30px rgba(0,0,0,.45);
+  --text:#ffffff;
+  --muted: rgba(255,255,255,.72);
 
+  --good:#2ee59d;
+  --bad:#ff4d4d;
+
+  --shadowPanel: 0 14px 40px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.08);
   --r: 18px;
   --r2: 14px;
-
-  --font: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
-
-  --maxW: 540px;     /* mobile-friendly width for 9:16 */
-  --hudH: 96px;      /* bottom HUD reserve */
 }
 
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
   margin:0;
-  font-family:var(--font);
-  background:
-    radial-gradient(900px 520px at 15% -10%, rgba(0,242,234,.20), transparent 55%),
-    radial-gradient(820px 520px at 85% -10%, rgba(255,0,80,.18), transparent 55%),
-    radial-gradient(1100px 800px at 50% 120%, rgba(0,0,0,.65), transparent 60%),
-    linear-gradient(180deg, #040914 0%, var(--bg0) 55%, #020611 100%);
+  font-family: system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;
+  background: radial-gradient(1200px 800px at 40% 0%, rgba(0,242,234,.12), transparent 60%),
+              radial-gradient(1000px 700px at 100% 10%, rgba(255,0,80,.10), transparent 60%),
+              linear-gradient(180deg, var(--bg0), #03070f);
   color:var(--text);
   overflow:hidden;
 }
 
-/* Core containers (ids from index.template.html) */
-#app{min-height:100%;width:100%}
-
-#gameRoot{
-  position:relative;
-  width:100%;
-  min-height:100vh;
-  display:flex;
-  justify-content:center;
-  align-items:stretch;
+/* Layout */
+.app{
+  height:100%;
+  display:grid;
+  grid-template-columns: 360px 1fr;
+  gap:14px;
+  padding:14px;
 }
 
-/* Main 9:16 stage */
-#gameScreen{
-  position:relative;
-  width:min(var(--maxW), 100vw);
-  min-height:100vh;
-  background:
-    radial-gradient(700px 520px at 50% 0%, rgba(255,255,255,.06), transparent 55%),
-    linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01));
-  border-left:1px solid rgba(255,255,255,.06);
-  border-right:1px solid rgba(255,255,255,.06);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,.03);
+.panel{
+  border-radius: var(--r);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadowPanel);
   overflow:hidden;
 }
 
-/* Canvas / stage area placed by game.js */
-.stage{
-  position:absolute;
-  inset:0;
-  padding:12px;
-  display:flex;
-  flex-direction:column;
-  gap:10px;
-}
+.left{display:flex; flex-direction:column; min-width:320px;}
+.center{position:relative; display:flex; flex-direction:column;}
 
-/* Top header bar */
-.topbar{
+.panelHeader{
+  padding:14px 14px 10px;
+  border-bottom:1px solid var(--line);
+  background: linear-gradient(180deg, rgba(255,255,255,.06), rgba(255,255,255,.02));
+}
+.panelBody{padding:14px; overflow:auto}
+.panelBody::-webkit-scrollbar{width:10px}
+.panelBody::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12); border-radius:10px}
+.panelBody::-webkit-scrollbar-track{background:transparent}
+
+.brand{display:flex; align-items:center; gap:10px;}
+.dot{
+  width:12px;height:12px;border-radius:50%;
+  background: radial-gradient(circle at 30% 30%, #fff, var(--aqua));
+  box-shadow: 0 0 0 3px rgba(0,242,234,.18), 0 0 20px rgba(0,242,234,.20);
+}
+.brandTitle{font-weight:900; letter-spacing:.2px}
+.brandSub{font-size:12px; opacity:.75; margin-top:2px}
+
+.kicker{font-size:13px; opacity:.85; line-height:1.35; margin-bottom:12px}
+
+.card{
+  border-radius: var(--r2);
+  background: rgba(0,0,0,.18);
+  border: 1px solid rgba(255,255,255,.08);
+  padding:12px;
+  margin-bottom:12px;
+}
+.cardTitle{font-weight:900; margin-bottom:10px}
+.small{font-size:12px; opacity:.78; line-height:1.35}
+
+.field{display:block; margin-bottom:10px}
+.fieldLabel{display:block; font-size:12px; opacity:.85; margin-bottom:6px}
+.input{
+  width:100%;
+  border-radius:12px;
+  border:1px solid rgba(255,255,255,.10);
+  background: rgba(0,0,0,.35);
+  color:var(--text);
+  padding:11px 12px;
+  outline:none;
+}
+.input:focus{border-color: rgba(0,242,234,.45); box-shadow: 0 0 0 3px rgba(0,242,234,.15)}
+
+.row{display:flex; gap:10px}
+.btn{
+  border-radius: 12px;
+  border:1px solid rgba(255,255,255,.14);
+  background: rgba(255,255,255,.06);
+  color:var(--text);
+  padding:10px 12px;
+  font-weight:800;
+  cursor:pointer;
+  transition: transform .08s ease, background .12s ease, border-color .12s ease;
+}
+.btn:hover{transform: translateY(-1px); background: rgba(255,255,255,.09)}
+.btn:active{transform: translateY(0px)}
+.btn.primary{
+  border-color: rgba(255,0,80,.55);
+  background: linear-gradient(180deg, rgba(255,0,80,.95), rgba(255,0,80,.70));
+  box-shadow: 0 10px 24px rgba(255,0,80,.20);
+}
+.status{font-size:12px; opacity:.78; margin-top:8px}
+
+.howList{margin:0; padding-left:18px; line-height:1.35; font-size:13px; opacity:.9}
+.howList li{margin:6px 0}
+
+/* Game area */
+.topBar{
+  padding:10px 12px;
   display:flex;
+  gap:10px;
   align-items:center;
   justify-content:space-between;
-  gap:10px;
-  padding:10px 12px;
-  border-radius:var(--r);
-  background:rgba(255,255,255,.05);
-  border:1px solid rgba(255,255,255,.10);
-  box-shadow:var(--shadow2);
+  border-bottom:1px solid var(--line);
+  background: linear-gradient(180deg, rgba(0,0,0,.18), rgba(0,0,0,.05));
 }
-
-.brand{
-  display:flex;
-  flex-direction:column;
-  gap:2px;
-}
-.brand .title{
-  font-weight:900;
-  letter-spacing:.2px;
-  font-size:18px;
-  line-height:1.1;
-}
-.brand .sub{
-  font-size:12px;
-  color:var(--muted);
-  line-height:1.15;
-}
-
-/* Connection pill */
 .pill{
   display:inline-flex;
   align-items:center;
   gap:8px;
-  padding:8px 10px;
+  padding:7px 10px;
   border-radius:999px;
   border:1px solid rgba(255,255,255,.12);
-  background:rgba(0,0,0,.20);
+  background: rgba(0,0,0,.20);
   font-size:12px;
-  color:var(--muted);
-  user-select:none;
-}
-.pill .dot{
-  width:10px;height:10px;border-radius:99px;
-  background:var(--bad);
-  box-shadow:0 0 0 3px rgba(255,77,77,.18);
-}
-.pill.connected .dot{
-  background:var(--good);
-  box-shadow:0 0 0 3px rgba(46,229,157,.18);
-}
-.pill strong{color:var(--text)}
-
-/* Main play area card */
-.playcard{
-  flex:1;
-  position:relative;
-  border-radius:var(--r);
-  background:
-    radial-gradient(650px 430px at 50% 20%, rgba(0,242,234,.10), transparent 55%),
-    radial-gradient(650px 430px at 50% 70%, rgba(255,0,80,.10), transparent 55%),
-    rgba(255,255,255,.03);
-  border:1px solid rgba(255,255,255,.10);
-  box-shadow:var(--shadow);
-  overflow:hidden;
-}
-
-/* Canvas element created by game.js */
-canvas.gameCanvas{
-  display:block;
-  width:100%;
-  height:100%;
-}
-
-/* Bottom HUD */
-.hud{
-  height:var(--hudH);
-  border-radius:var(--r);
-  background:rgba(255,255,255,.05);
-  border:1px solid rgba(255,255,255,.10);
-  box-shadow:var(--shadow2);
-  display:flex;
-  align-items:center;
-  justify-content:space-between;
-  gap:10px;
-  padding:10px 12px;
-}
-
-.hud .left,
-.hud .right{
-  display:flex;
-  gap:10px;
-  align-items:center;
-}
-
-.stat{
-  display:flex;
-  flex-direction:column;
-  gap:2px;
-  min-width:74px;
-}
-.stat .k{
-  font-size:11px;
-  color:var(--muted);
-}
-.stat .v{
-  font-size:18px;
   font-weight:900;
   letter-spacing:.2px;
 }
+.pill.subtle{opacity:.78}
 
-/* Meter */
-.meter{
+.gameRoot{
+  position:relative;
   flex:1;
-  height:14px;
-  border-radius:999px;
-  border:1px solid rgba(255,255,255,.10);
-  background:rgba(0,0,0,.25);
+  display:flex;
+  align-items:center;
+  justify-content:center;
   overflow:hidden;
-  box-shadow: inset 0 1px 0 rgba(255,255,255,.05);
-}
-.meter > i{
-  display:block;
-  height:100%;
-  width:0%;
-  background: linear-gradient(90deg, var(--aqua), var(--pink));
 }
 
-/* Setup overlay (already has fallback CSS in HTML; this refines it) */
-#setupOverlay .overlay-card{
-  background:
-    radial-gradient(640px 420px at 15% 0%, rgba(0,242,234,.16), transparent 55%),
-    radial-gradient(640px 420px at 85% 0%, rgba(255,0,80,.14), transparent 55%),
-    rgba(255,255,255,.06);
+#gameCanvas{
+  width:min(100%, 720px);
+  height:auto;
+  aspect-ratio: 9 / 16;
+  border-radius: 22px;
+  background: rgba(0,0,0,.28);
+  border:1px solid rgba(255,255,255,.10);
+  box-shadow: 0 18px 60px rgba(0,0,0,.55);
 }
 
-#setupOverlay input[type="text"], #setupOverlay input[type="number"]{
-  background:rgba(0,0,0,.22);
+.hud{
+  position:absolute;
+  top:14px;
+  left:14px;
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
 }
-
-#setupOverlay button#startGameBtn{
-  background: linear-gradient(90deg, rgba(0,242,234,.20), rgba(255,0,80,.20));
-  border:1px solid rgba(255,255,255,.16);
+.hudBlock{
+  min-width:70px;
+  border-radius: 14px;
+  padding:8px 10px;
+  background: rgba(0,0,0,.25);
+  border:1px solid rgba(255,255,255,.10);
 }
+.hudLabel{font-size:11px; opacity:.78}
+.hudValue{font-size:16px; font-weight:900}
 
-/* Flags (optional pop-outs on right side) */
-#flags{
-  position:fixed;
-  top:84px;
-  right:10px;
-  width:min(320px, 46vw);
+.scoreboard{
+  position:absolute;
+  bottom:14px;
+  left:14px;
+  right:14px;
+  display:flex;
+  gap:10px;
+  flex-wrap:wrap;
+  justify-content:flex-start;
+  pointer-events:none;
+}
+.scoreCard{
+  pointer-events:none;
+  min-width: 180px;
+  border-radius: 16px;
+  padding:10px 12px;
+  background: rgba(0,0,0,.28);
+  border:1px solid rgba(255,255,255,.12);
+  backdrop-filter: blur(6px);
+}
+.scoreTitle{font-size:11px; opacity:.75; font-weight:900; letter-spacing:.2px}
+.scoreRow{display:flex; align-items:center; gap:8px; margin-top:8px}
+.pfp{
+  width:28px;height:28px;border-radius:50%;
+  background: rgba(255,255,255,.12);
+  border:1px solid rgba(255,255,255,.18);
+  overflow:hidden;
+  flex:0 0 auto;
+}
+.pfp img{width:100%;height:100%;object-fit:cover}
+.nick{font-weight:900; font-size:12px; max-width:120px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.val{margin-left:auto; font-weight:900; font-size:12px; opacity:.9}
+
+/* Flags (right side) */
+.flags{
+  position:absolute;
+  right:14px;
+  top:72px;
+  width:min(320px, 38vw);
   display:flex;
   flex-direction:column;
   gap:10px;
   pointer-events:none;
-  z-index:30;
 }
-
 .flag{
   display:flex;
   gap:10px;
   align-items:center;
   padding:10px 12px;
-  border-radius:16px;
-  border:1px solid rgba(255,255,255,.12);
-  background:rgba(0,0,0,.40);
-  box-shadow:var(--shadow2);
-  transform: translateX(24px);
-  opacity:0;
-  animation: flagIn .18s ease-out forwards, flagOut .22s ease-in forwards;
-  animation-delay: 0s, 2.4s;
+  border-radius: 16px;
+  border:1px solid rgba(255,255,255,.16);
+  background: linear-gradient(180deg, rgba(0,242,234,.16), rgba(0,0,0,.28));
+  box-shadow: 0 18px 50px rgba(0,0,0,.45);
+  transform: translateX(20px);
+  opacity: 0;
+  animation: flagIn 3.2s ease forwards;
 }
+.flag .meta{display:flex; flex-direction:column; min-width:0}
+.flag .meta .line1{font-size:12px; font-weight:900; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.flag .meta .line2{font-size:12px; opacity:.85; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
 
 @keyframes flagIn{
-  from{transform:translateX(24px);opacity:0}
-  to{transform:translateX(0);opacity:1}
-}
-@keyframes flagOut{
-  from{transform:translateX(0);opacity:1}
-  to{transform:translateX(24px);opacity:0}
+  0%{transform:translateX(26px); opacity:0}
+  12%{transform:translateX(0); opacity:1}
+  80%{transform:translateX(0); opacity:1}
+  100%{transform:translateX(0); opacity:0}
 }
 
-.flag .pfp{
-  width:40px;height:40px;border-radius:999px;
+/* Flash overlay */
+.flashLayer{
+  position:absolute;
+  inset:0;
+  pointer-events:none;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+}
+.flashCard{
+  width:min(520px, 92%);
+  border-radius: 22px;
+  padding:16px;
+  background: rgba(0,0,0,.35);
   border:1px solid rgba(255,255,255,.14);
-  background:rgba(255,255,255,.06);
-  overflow:hidden;
-  flex:0 0 auto;
+  backdrop-filter: blur(8px);
+  box-shadow: 0 24px 70px rgba(0,0,0,.55);
+  transform: scale(.92);
+  opacity:0;
+  animation: pop .9s ease forwards;
 }
-.flag .pfp img{width:100%;height:100%;object-fit:cover;display:block}
+@keyframes pop{
+  0%{transform:scale(.90); opacity:0}
+  15%{transform:scale(1.02); opacity:1}
+  85%{transform:scale(1.00); opacity:1}
+  100%{transform:scale(1.00); opacity:0}
+}
+.flashTop{display:flex; align-items:center; gap:12px}
+.flashTop .pfp{width:48px;height:48px}
+.flashName{font-weight:1000; font-size:18px}
+.flashMsg{opacity:.88; margin-top:8px}
 
-.flag .txt{
-  flex:1;
-  min-width:0;
-  line-height:1.15;
+/* Overlay */
+.overlay{
+  position:absolute;
+  inset:0;
+  background: radial-gradient(700px 500px at 60% 0%, rgba(0,242,234,.18), transparent 60%),
+              radial-gradient(700px 500px at 20% 30%, rgba(255,0,80,.16), transparent 60%),
+              rgba(0,0,0,.55);
+  display:flex;
+  align-items:center;
+  justify-content:center;
 }
-.flag .who{
-  font-weight:900;
-  font-size:13px;
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
+.overlayCard{
+  width:min(520px, 92%);
+  border-radius: 22px;
+  padding:16px;
+  background: rgba(0,0,0,.35);
+  border:1px solid rgba(255,255,255,.14);
+  backdrop-filter: blur(10px);
+  box-shadow: 0 24px 70px rgba(0,0,0,.55);
+  text-align:center;
 }
-.flag .msg{
-  font-size:13px;
-  color:rgba(255,255,255,.86);
-  white-space:nowrap;
-  overflow:hidden;
-  text-overflow:ellipsis;
-  margin-top:2px;
-}
+.overlayTitle{font-size:20px; font-weight:1000}
+.overlaySub{opacity:.85; margin-top:6px; line-height:1.35}
+.overlayActions{display:flex; gap:10px; justify-content:center; margin-top:14px}
+.overlayHint{opacity:.72; font-size:12px; margin-top:10px}
 
-/* Status text in-game */
-#statusTextInGame{
-  padding:6px 10px;
-  border-radius:999px;
-  background:rgba(0,0,0,.35);
-  border:1px solid rgba(255,255,255,.10);
-}
-
-/* Small screens */
-@media (max-width: 520px){
-  #flags{width:min(340px, 70vw)}
-  .hud{height:92px}
-  .stat .v{font-size:17px}
-}
-
-/* Ultra small */
-@media (max-width: 380px){
-  .brand .title{font-size:16px}
-  .hud{padding:10px}
-  .stat{min-width:66px}
+@media (max-width: 980px){
+  body{overflow:auto}
+  .app{grid-template-columns:1fr; padding:10px}
+  .left{min-width:unset}
+  #gameCanvas{width:100%}
+  .flags{width:min(360px, 92vw)}
 }

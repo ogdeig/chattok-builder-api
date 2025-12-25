@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>Asteroid Assault</title>
+  <title>ChatTok Live Game</title>
 
   <meta name="theme-color" content="#050b17" />
   <link rel="stylesheet" href="style.css" />
@@ -94,14 +94,16 @@
         <div class="brand">
           <div class="dot"></div>
           <div class="brandText">
-            <div class="brandTitle">Asteroid Assault</div>
-            <div class="brandSub">Defend Against the Cosmic Onslaught!</div>
+            <div class="brandTitle" id="uiBrandTitle">ChatTok Live Game</div>
+            <div class="brandSub" id="uiBrandSub">Live Interactive</div>
           </div>
         </div>
       </div>
 
       <div class="panelBody">
-        <div class="kicker">Join the fight against asteroid swarms in this interactive chat game on TikTok LIVE.</div>
+        <div class="kicker" id="uiKicker">
+          Connect to TikTok LIVE and let chat control the action.
+        </div>
 
         <div class="card">
           <div class="cardTitle">Setup</div>
@@ -121,15 +123,18 @@
 
         <div class="card">
           <div class="cardTitle">How to Play</div>
-          <ul class="howList">
-            <li>Type !join to enter the game.</li>
-            <li>Use !fire command with a grid position (e.g., !fire A4) to shoot down asteroids.</li>
+          <ul class="howList" id="uiHowToPlayList">
+            <li>Type !join to join.</li>
+            <li>Type coordinates like A4 to fire.</li>
           </ul>
+          <div class="small" style="margin-top:10px;opacity:.85" id="uiCommandHint">
+            Commands: <strong id="uiCmdJoin">!join</strong> • <strong id="uiCmdFire">!fire A4</strong>
+          </div>
         </div>
 
         <div class="card">
           <div class="cardTitle">Host Tips</div>
-          <div class="small">
+          <div class="small" id="uiHostTips">
             • Pin a message showing the commands.<br/>
             • Encourage quick repeats: “A4, B7, J2…”<br/>
             • Likes and gifts trigger bonus effects (shown on-screen).
@@ -140,7 +145,7 @@
 
     <main class="panel center">
       <div class="topBar">
-        <div class="pill" id="gameTitlePill">Asteroid Assault</div>
+        <div class="pill" id="gameTitlePill">ChatTok Live Game</div>
         <div class="pill subtle" id="statusTextInGame">Not connected</div>
       </div>
 
@@ -174,13 +179,17 @@
 
       <div id="setupOverlay" class="overlay">
         <div class="overlayCard">
-          <div class="overlayTitle">Asteroid Assault</div>
-          <div class="overlaySub">Join the fight against asteroid swarms in this interactive chat game on TikTok LIVE.</div>
+          <div class="overlayTitle" id="uiOverlayTitle">ChatTok Live Game</div>
+          <div class="overlaySub" id="uiOverlaySub">
+            Connect to TikTok LIVE and let chat control the action.
+          </div>
           <div class="overlayActions">
             <button id="overlayStartBtn" class="btn primary">Start</button>
             <button id="overlayPracticeBtn" class="btn">Practice</button>
           </div>
-          <div class="overlayHint">Tip: you can still practice by tapping the grid if TikTok isn’t connected.</div>
+          <div class="overlayHint" id="uiOverlayHint">
+            Tip: you can still practice by tapping the grid if TikTok isn’t connected.
+          </div>
         </div>
       </div>
     </main>
@@ -203,5 +212,50 @@
   </script>
 
   <script src="game.js"></script>
+
+  <!-- UI sync: populate visible text from injected SPEC (if exposed globally) -->
+  <script>
+    (function(){
+      function setText(id, text){
+        const el = document.getElementById(id);
+        if (el && typeof text === "string" && text.trim()) el.textContent = text;
+      }
+      function setList(id, items){
+        const el = document.getElementById(id);
+        if (!el) return;
+        if (!Array.isArray(items) || !items.length) return;
+        el.innerHTML = "";
+        for (const it of items) {
+          const li = document.createElement("li");
+          li.textContent = String(it);
+          el.appendChild(li);
+        }
+      }
+
+      const S = window.__CHATTOK_SPEC__;
+      if (!S || typeof S !== "object") return;
+
+      const title = String(S.title || "ChatTok Live Game");
+      const subtitle = String(S.subtitle || "Live Interactive");
+      const oneSentence = String(S.oneSentence || "Connect to TikTok LIVE and let chat control the action.");
+      const joinCmd = String(S.commands?.join || "!join");
+      const fireCmd = String(S.commands?.fire || "!fire A4");
+
+      document.title = title;
+
+      setText("uiBrandTitle", title);
+      setText("uiBrandSub", subtitle);
+      setText("uiKicker", oneSentence);
+
+      setText("gameTitlePill", title);
+      setText("uiOverlayTitle", title);
+      setText("uiOverlaySub", oneSentence);
+
+      setText("uiCmdJoin", joinCmd);
+      setText("uiCmdFire", fireCmd);
+
+      setList("uiHowToPlayList", S.howToPlay);
+    })();
+  </script>
 </body>
 </html>

@@ -1,18 +1,6 @@
 /* =========================================================
    ChatTok Gaming — AI Game Builder API (Render)
    server.js — Production-ready, template-first
-   Key goals:
-   - Stable builder/API contract (/api/plan + /api/generate + /api/edit)
-   - No CSS corruption (CSS is template-only with token injection)
-   - No missing DOM ids (templates are authoritative)
-   - TikTok connection contract preserved (game.js template)
-   - Reliability: OpenAI timeouts + safe fallbacks (never return empty files)
-
-   ENV (Render):
-   - OPENAI_API_KEY
-   - OPENAI_MODEL_SPEC (optional, default gpt-4o-mini)
-   - OPENAI_TIMEOUT_MS (optional, default 25000)
-   - ALLOWED_ORIGINS (optional CSV)
 ========================================================= */
 "use strict";
 
@@ -25,13 +13,15 @@ require("dotenv").config();
 
 const app = express();
 
+// ✅ REQUIRED on Render (behind proxy) for express-rate-limit + correct IPs
+app.set("trust proxy", 1);
+
 // -----------------------------
 // Basic middleware
 // -----------------------------
 app.disable("x-powered-by");
 app.use(express.json({ limit: "1mb" }));
 
-// No caching for generation endpoints
 function noStore(_req, res, next) {
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.setHeader("Pragma", "no-cache");
@@ -43,8 +33,8 @@ function noStore(_req, res, next) {
 // Rate limiting (protect Render)
 // -----------------------------
 const apiLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 min
-  max: 120,            // 120 req/min per IP
+  windowMs: 60 * 1000,
+  max: 120,
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -54,11 +44,9 @@ app.use("/api/", apiLimiter);
 // CORS
 // -----------------------------
 const DEFAULT_ALLOWED = new Set([
-  // Your real site(s)
   "https://chattokgaming.com",
   "https://www.chattokgaming.com",
 
-  // GitHub Pages / dev
   "https://ogdeig.github.io",
   "http://localhost:3000",
   "http://localhost:5173",
@@ -78,14 +66,8 @@ const allowedOrigins = getAllowedOrigins();
 
 const corsOptions = {
   origin: function (origin, cb) {
-    // Allow non-browser tools (no Origin header)
     if (!origin) return cb(null, true);
-
-    // Allow known origins
     if (allowedOrigins.has(origin)) return cb(null, true);
-
-    // IMPORTANT: do NOT throw an Error here (it looks like a server 500).
-    // Returning false causes the browser to block with a clear CORS message.
     console.warn("CORS blocked origin:", origin);
     return cb(null, false);
   },
@@ -189,7 +171,6 @@ function renderIndexHtml({ spec, theme }) {
     howLis || "<li>Type !join to join.</li><li>Type coordinates like A4 to play.</li>"
   );
 
-  // Theme is applied in CSS; still include as meta tokens for future use
   const th = normalizeTheme(theme);
   html = html.replaceAll("{{THEME_PRIMARY}}", th.primary);
   html = html.replaceAll("{{THEME_SECONDARY}}", th.secondary);
@@ -405,7 +386,6 @@ app.get("/api/models", (_req, res) => {
   });
 });
 
-// /api/plan (builder step 1)
 app.post("/api/plan", noStore, async (req, res) => {
   try {
     const prompt = safeStr(req.body?.prompt || req.body?.idea || req.body?.text || "");
@@ -454,9 +434,6 @@ app.post("/api/plan", noStore, async (req, res) => {
   }
 });
 
-// -----------------------------
-// game.js builder (template-first, spec-driven)
-// -----------------------------
 function buildGameJs({ spec }) {
   const s = isObj(spec) ? spec : fallbackSpecFromIdea("");
   let js = String(TEMPLATES.js || "");
@@ -540,7 +517,6 @@ async function generateHandler(req, res) {
 app.post("/api/generate", noStore, generateHandler);
 app.post("/api/build", noStore, generateHandler);
 
-// Apply limited edits (builder expects patches[])
 app.post("/api/edit", noStore, async (req, res) => {
   try {
     const remainingEdits = Number(req.body?.remainingEdits ?? 0);
@@ -593,9 +569,6 @@ app.post("/api/edit", noStore, async (req, res) => {
   }
 });
 
-// -----------------------------
-// Startup (exactly one listen)
-// -----------------------------
 const PORT = Number(process.env.PORT || 3000);
 app.listen(PORT, () => {
   console.log(`ChatTok Builder API listening on ${PORT}`);

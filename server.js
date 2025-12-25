@@ -1,548 +1,382 @@
-/* =========================================================
-   ChatTok Gaming — AI Game Builder API (Render)
-   server.js — Production-ready, template-first
-
-   Fixes included:
-   - Render proxy + express-rate-limit validation (trust proxy)
-   - /health now returns endpoints so builder contract auto-detect works
-   - Spec generation is template-aware (arena/trivia/wheel/boss) and NOT forced into "!fire A4"
-   - Adds temperature + nonce to avoid “same spec every time” feel
-   - Reliability: OpenAI timeouts + safe fallbacks (never return empty files)
-
-   ENV (Render):
-   - OPENAI_API_KEY
-   - OPENAI_MODEL_SPEC (optional, default gpt-4o-mini)
-   - OPENAI_TIMEOUT_MS (optional, default 25000)
-   - OPENAI_TEMPERATURE (optional, default 1.0)
-   - ALLOWED_ORIGINS (optional CSV)
-========================================================= */
-"use strict";
-
-const path = require("path");
-const fs = require("fs");
-const crypto = require("crypto");
-const express = require("express");
-const cors = require("cors");
-const rateLimit = require("express-rate-limit");
-require("dotenv").config();
+import express from "express";
+import cors from "cors";
+import crypto from "crypto";
+import OpenAI from "openai";
 
 const app = express();
 
-// ✅ Render/proxy fix (required for express-rate-limit when X-Forwarded-For exists)
-app.set("trust proxy", 1);
+/* ===============================
+   Config helpers
+   =============================== */
 
-// -----------------------------
-// Basic middleware
-// -----------------------------
-app.disable("x-powered-by");
-app.use(express.json({ limit: "1mb" }));
+function getTimeoutMs() {
+  const v = Number(process.env.OPENAI_TIMEOUT_MS || 60000);
+  return Number.isFinite(v) && v >= 5000 ? v : 60000;
+}
+function getTemperature() {
+  const v = Number(process.env.OPENAI_TEMPERATURE || 0.4);
+  if (!Number.isFinite(v)) return 0.4;
+  return Math.max(0, Math.min(1.2, v));
+}
+function safeStr(x, max = 20000) {
+  const s = String(x ?? "").trim();
+  return s.length > max ? s.slice(0, max) : s;
+}
+function assert(cond, msg, status = 400) {
+  if (!cond) {
+    const err = new Error(msg);
+    err.status = status;
+    throw err;
+  }
+}
+function normalizeTheme(theme = {}) {
+  const pick = (k, fallback) => {
+    const v = String(theme?.[k] ?? fallback).trim();
+    return /^#[0-9a-fA-F]{6}$/.test(v) ? v : fallback;
+  };
+  return {
+    primary: pick("primary", "#ff0050"),
+    secondary: pick("secondary", "#00f2ea"),
+    bg: pick("bg", "#050b17"),
+    surface: pick("surface", "#0b1632"),
+    text: pick("text", "#ffffff"),
+  };
+}
 
-// Rate limit (safe defaults; adjust as needed)
-const limiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 120, // per IP per minute
-  standardHeaders: true,
-  legacyHeaders: false,
-});
-app.use(limiter);
+/* ===============================
+   Middleware
+   =============================== */
 
-// No caching for generation endpoints
+app.use(express.json({ limit: "2mb" }));
+
+// CORS: allow GitHub Pages + your future domains.
+// Add/remove as needed.
+const allowedOrigins = new Set([
+  "https://ogdeig.github.io",
+  "http://localhost:5500",
+  "http://127.0.0.1:5500",
+  "https://chattokapps.com",
+  "https://www.chattokapps.com"
+]);
+
+app.use(
+  cors({
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true); // allow non-browser requests
+      if (allowedOrigins.has(origin)) return cb(null, true);
+      return cb(new Error("CORS blocked for origin: " + origin));
+    },
+  })
+);
+
 function noStore(_req, res, next) {
   res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
   res.setHeader("Pragma", "no-cache");
   res.setHeader("Expires", "0");
+  res.setHeader("Surrogate-Control", "no-store");
   next();
 }
 
-// -----------------------------
-// CORS
-// -----------------------------
-const DEFAULT_ALLOWED = new Set([
-  "https://ogdeig.github.io",
-  "https://chattokgaming.com",
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://localhost:8080",
-  "http://127.0.0.1:8080",
-]);
-function listRoutes(app) {
-  const routes = [];
-  app._router?.stack?.forEach((layer) => {
-    if (layer.route && layer.route.path) {
-      const methods = Object.keys(layer.route.methods || {}).map(m => m.toUpperCase());
-      routes.push({ path: layer.route.path, methods });
-    } else if (layer.name === "router" && layer.handle?.stack) {
-      layer.handle.stack.forEach((l2) => {
-        if (l2.route && l2.route.path) {
-          const methods = Object.keys(l2.route.methods || {}).map(m => m.toUpperCase());
-          routes.push({ path: l2.route.path, methods });
-        }
-      });
+/* ===============================
+   Route listing helper
+   =============================== */
+
+function listRoutes(appInstance) {
+  const out = [];
+
+  const walkStack = (stack, prefix = "") => {
+    for (const layer of stack) {
+      // direct route
+      if (layer.route?.path) {
+        const methods = Object.keys(layer.route.methods || {})
+          .filter(Boolean)
+          .map((m) => m.toUpperCase());
+        out.push({ path: prefix + layer.route.path, methods });
+        continue;
+      }
+
+      // router mounted with app.use("/prefix", router)
+      if (layer.name === "router" && layer.handle?.stack) {
+        // Express stores mount path in regexp; best-effort:
+        // if layer.regexp exists, we keep prefix as-is; you still see internal route paths.
+        walkStack(layer.handle.stack, prefix);
+      }
     }
-  });
-  return routes;
-}
-
-console.log("ROUTES:", listRoutes(app));
-
-function getAllowedOrigins() {
-  const extra = String(process.env.ALLOWED_ORIGINS || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  return new Set([...DEFAULT_ALLOWED, ...extra]);
-}
-
-const allowedOrigins = getAllowedOrigins();
-
-app.use(
-  cors({
-    origin: function (origin, cb) {
-      // Allow non-browser tools (no Origin header)
-      if (!origin) return cb(null, true);
-      if (allowedOrigins.has(origin)) return cb(null, true);
-      return cb(new Error("CORS: origin not allowed"), false);
-    },
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: false,
-    maxAge: 86400,
-  })
-);
-
-app.options("*", cors());
-
-// -----------------------------
-// Template loading
-// -----------------------------
-const TPL_DIR = __dirname;
-
-function readTemplate(file) {
-  const p = path.join(TPL_DIR, file);
-  return fs.readFileSync(p, "utf8");
-}
-
-function loadTemplates() {
-  return {
-    index: readTemplate("index.template.html"),
-    css: readTemplate("style.template.css"),
-    js: readTemplate("game.template.js"),
   };
+
+  if (appInstance?._router?.stack) walkStack(appInstance._router.stack, "");
+  // de-dupe
+  const seen = new Set();
+  return out.filter((r) => {
+    const key = `${r.methods.join(",")} ${r.path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
-let TEMPLATES = loadTemplates();
+/* ===============================
+   OpenAI helpers (cheap + robust)
+   =============================== */
 
-// -----------------------------
-// Helpers
-// -----------------------------
-function assert(cond, msg) {
-  if (!cond) {
-    const e = new Error(msg || "Assertion failed");
-    e.status = 400;
-    throw e;
+function getOpenAIClient() {
+  const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+  if (!apiKey) return null;
+  return new OpenAI({ apiKey });
+}
+
+function extractFirstJsonObject(text) {
+  const s = String(text || "").trim();
+  if (!s) return null;
+
+  // Try direct parse
+  try { return JSON.parse(s); } catch {}
+
+  // Try to find first {...} block
+  const start = s.indexOf("{");
+  const end = s.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    const sub = s.slice(start, end + 1);
+    try { return JSON.parse(sub); } catch {}
   }
-}
 
-function isObj(v) {
-  return v && typeof v === "object" && !Array.isArray(v);
-}
-
-function safeStr(v, max = 5000) {
-  return String(v || "").replace(/\s+/g, " ").trim().slice(0, max);
-}
-
-function normalizeHex(s) {
-  const t = String(s || "").trim();
-  if (!t) return "";
-  const x = t.startsWith("#") ? t : `#${t}`;
-  return /^#[0-9a-fA-F]{6}$/.test(x) ? x.toLowerCase() : "";
-}
-
-function normalizeTheme(themeLike) {
-  const th = isObj(themeLike) ? themeLike : {};
-  const primary = normalizeHex(th.primary) || "#ff0050";
-  const secondary = normalizeHex(th.secondary) || "#00f2ea";
-  const background = normalizeHex(th.background) || "#050b17";
-  return { primary, secondary, background };
-}
-
-function injectThemeTokens(css, themeLike) {
-  const th = normalizeTheme(themeLike);
-  let out = String(css || "");
-  out = out.replaceAll("__THEME_PRIMARY__", th.primary);
-  out = out.replaceAll("__THEME_SECONDARY__", th.secondary);
-  out = out.replaceAll("__THEME_BACKGROUND__", th.background);
-  return out;
-}
-
-function escapeHtml(s) {
-  return String(s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-
-function renderIndexHtml({ spec, theme }) {
-  const s = isObj(spec) ? spec : {};
-  const how = Array.isArray(s.howToPlay) ? s.howToPlay : [];
-  const howLis = how
-    .slice(0, 6)
-    .map((x) => `<li>${escapeHtml(String(x || "").trim())}</li>`)
-    .join("\n");
-
-  let html = String(TEMPLATES.index || "");
-  html = html.replaceAll("{{TITLE}}", escapeHtml(safeStr(s.title || "ChatTok Live Game", 80)));
-  html = html.replaceAll("{{SUBTITLE}}", escapeHtml(safeStr(s.subtitle || "Live Interactive", 120)));
-  html = html.replaceAll(
-    "{{ONE_SENTENCE}}",
-    escapeHtml(safeStr(s.oneSentence || "Connect to TikTok LIVE and let chat control the action.", 180))
-  );
-  html = html.replaceAll(
-    "{{HOW_TO_PLAY_LI}}",
-    howLis || "<li>Type !join to join.</li><li>Follow the on-screen prompt to play.</li>"
-  );
-  html = html.replaceAll("{{THEME_PRIMARY}}", normalizeTheme(theme).primary);
-  html = html.replaceAll("{{THEME_SECONDARY}}", normalizeTheme(theme).secondary);
-  html = html.replaceAll("{{THEME_BACKGROUND}}", normalizeTheme(theme).background);
-  return html;
-}
-
-function validateNoPlaceholders(text, label) {
-  const s = String(text || "");
-  if (s.includes("__THEME_PRIMARY__") || s.includes("__THEME_SECONDARY__") || s.includes("__THEME_BACKGROUND__")) {
-    const e = new Error(`${label} still contains theme placeholders`);
-    e.status = 500;
-    throw e;
-  }
-}
-
-function stableJson(obj, maxLen = 60000) {
-  const s = JSON.stringify(obj, null, 2);
-  if (s.length > maxLen) return JSON.stringify(obj);
-  return s;
-}
-
-// Try to parse JSON even if the model adds stray text
-function safeJsonParseMaybe(txt) {
-  const raw = String(txt || "").trim().replace(/^\uFEFF/, "");
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch {}
-  const first = raw.indexOf("{");
-  const last = raw.lastIndexOf("}");
-  if (first >= 0 && last > first) {
-    const slice = raw.slice(first, last + 1);
-    try {
-      return JSON.parse(slice);
-    } catch {}
-  }
   return null;
 }
 
-function extractSpecFromGameJs(jsText) {
-  const s = String(jsText || "");
-  const m = s.match(/const\s+SPEC\s*=\s*({[\s\S]*?})\s*;\s*\/\*__SPEC_END__\*\//);
-  if (!m) return null;
-  return safeJsonParseMaybe(m[1]);
-}
+async function openaiJson({ model, system, user, timeoutMs, temperature }) {
+  const client = getOpenAIClient();
+  if (!client) return { ok: false, error: "OPENAI_API_KEY missing" };
 
-// -----------------------------
-// Spec defaults by templateId
-// -----------------------------
-function baseSpecForTemplate(templateId) {
-  const t = String(templateId || "arena").toLowerCase();
-
-  if (t === "trivia") {
-    return {
-      archetype: "trivia-rounds",
-      title: "Trivia Rush",
-      subtitle: "Fast Questions. Loud Chat.",
-      oneSentence: "Viewers join teams and answer in chat while the host keeps the pace.",
-      howToPlay: [
-        "Type !join to enter.",
-        "Answer by typing A, B, C, or D.",
-        "Correct answers score points instantly.",
-        "Gifts can trigger double-points or a bonus question.",
-      ],
-      defaultSettings: { roundSeconds: 20, questionsPerRound: 7, winGoal: 50 },
-      commands: { join: "!join", answer: "A / B / C / D" },
-      visuals: { correctEmoji: "✅", wrongEmoji: "❌", hypeEmoji: "🔥" },
-    };
-  }
-
-  if (t === "wheel") {
-    return {
-      archetype: "spin-wheel",
-      title: "Spin Frenzy",
-      subtitle: "Chat Joins. Wheel Decides.",
-      oneSentence: "Viewers type a keyword to join the wheel — host spins for chaos and prizes.",
-      howToPlay: [
-        "Type !join to enter the wheel.",
-        "Host spins — winner pops with their profile picture.",
-        "Likes add speed. Gifts add wedges or multipliers.",
-      ],
-      defaultSettings: { spinCooldown: 12, maxPlayers: 60, winGoal: 10 },
-      commands: { join: "!join", spin: "!spin" },
-      visuals: { winEmoji: "🎉", joinEmoji: "🌀", boostEmoji: "⚡" },
-    };
-  }
-
-  if (t === "boss") {
-    return {
-      archetype: "boss-fight",
-      title: "Raid Boss Live",
-      subtitle: "Team Up. Break the Boss.",
-      oneSentence: "Chat joins a raid party and attacks the boss in real-time with commands, likes, and gifts.",
-      howToPlay: [
-        "Type !join to enlist.",
-        "Type !atk or !heal when prompted.",
-        "Boss fights back on a timer.",
-        "Big gifts trigger ultimates or shields.",
-      ],
-      defaultSettings: { bossHp: 5000, roundSeconds: 45, winGoal: 3 },
-      commands: { join: "!join", attack: "!atk", heal: "!heal" },
-      visuals: { hitEmoji: "💥", healEmoji: "💚", bossEmoji: "👹" },
-    };
-  }
-
-  // arena (default)
-  return {
-    archetype: "arena-action",
-    title: "Arena Assault",
-    subtitle: "Survive the Chaos in Chat!",
-    oneSentence: "Pilot the action while viewers spawn hazards, buffs, and chaos through chat.",
-    howToPlay: [
-      "Type !join to spawn into the arena.",
-      "Chat triggers events with keywords shown on-screen.",
-      "Likes charge power. Gifts unleash big attacks.",
-    ],
-    defaultSettings: { roundSeconds: 35, winGoal: 25, difficulty: 2 },
-    commands: { join: "!join", action: "!drop / !buff / !boom" },
-    visuals: { hitEmoji: "💥", missEmoji: "💨", powerEmoji: "⚡" },
-  };
-}
-
-function fallbackSpecFromIdea(idea, templateId) {
-  const base = baseSpecForTemplate(templateId);
-  const titleHint = safeStr(idea, 50);
-  const out = { ...base };
-
-  // Small “uniqueness” tweak even in fallback mode
-  if (titleHint && titleHint.length >= 6) {
-    out.title = titleHint.slice(0, 40).replace(/^[^a-z0-9]+/i, "").trim() || out.title;
-  }
-
-  return out;
-}
-
-// -----------------------------
-// OpenAI (Responses API) with timeout + fallbacks
-// -----------------------------
-function getTimeoutMs() {
-  const n = Number(process.env.OPENAI_TIMEOUT_MS || 25000);
-  return Number.isFinite(n) && n >= 5000 ? Math.floor(n) : 25000;
-}
-
-function getTemperature() {
-  const t = Number(process.env.OPENAI_TEMPERATURE ?? 1.0);
-  if (!Number.isFinite(t)) return 1.0;
-  return Math.max(0, Math.min(2, t));
-}
-
-async function callOpenAIResponses({ apiKey, model, maxOutputTokens, prompt, timeoutMs }) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-
-  const payload = {
-    model,
-    max_output_tokens: maxOutputTokens,
-    temperature: getTemperature(), // ✅ supported by Responses API docs
-    input: [{ role: "user", content: prompt }],
-    store: false,
-  };
+  const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const r = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      signal: controller.signal,
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(payload),
-    });
-
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const msg = data?.error?.message || "OpenAI request failed";
-      const err = new Error(msg);
-      err.status = r.status;
-      err.details = data;
-      throw err;
-    }
-    return data;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function extractTextFromResponses(resp) {
-  if (!resp) return "";
-  if (typeof resp.output_text === "string") return resp.output_text;
-  const out = resp.output;
-  if (!Array.isArray(out)) return "";
-  let s = "";
-  for (const item of out) {
-    const content = item?.content;
-    if (!Array.isArray(content)) continue;
-    for (const c of content) {
-      if (c?.type === "output_text" && typeof c.text === "string") s += c.text;
-    }
-  }
-  return s;
-}
-
-async function generateSpec({ apiKey, model, idea, templateId }) {
-  const t = String(templateId || "arena").toLowerCase();
-  const base = baseSpecForTemplate(t);
-
-  // ✅ nonce makes requests feel “fresh” even with similar prompts
-  const nonce = crypto.randomUUID();
-
-  const prompt = [
-    "Return ONLY valid JSON. No markdown.",
-    "Create a compact game spec for a TikTok LIVE interactive game.",
-    "",
-    `TEMPLATE FLAVOR: ${t}`,
-    `NONCE: ${nonce}`,
-    "",
-    "Rules:",
-    "- The spec MUST match the user's idea (do NOT default to asteroids unless the idea is asteroids).",
-    "- MUST be playable from chat (join + 1-3 core actions).",
-    "- MUST look alive immediately on load (HUD + motion) even before connect.",
-    "- MUST NOT reuse the same title/subtitle from earlier runs unless the idea clearly requests it.",
-    "- Keep it compact (short arrays, practical defaults).",
-    "",
-    "Output JSON keys required (same shape as this example, but values should match the idea/template):",
-    stableJson(
+    // Use chat.completions for broad compatibility
+    const resp = await client.chat.completions.create(
       {
-        title: base.title,
-        subtitle: base.subtitle,
-        oneSentence: base.oneSentence,
-        howToPlay: base.howToPlay,
-        defaultSettings: base.defaultSettings,
-        commands: base.commands,
-        visuals: base.visuals,
-        archetype: base.archetype,
+        model,
+        temperature,
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
       },
-      12000
-    ),
-    "",
-    "Game idea:",
-    safeStr(idea, 1800),
-  ].join("\n");
+      { signal: controller.signal }
+    );
 
+    const text = resp?.choices?.[0]?.message?.content || "";
+    const json = extractFirstJsonObject(text);
+    if (!json) return { ok: false, error: "Model did not return valid JSON", raw: text };
+    return { ok: true, json, raw: text };
+  } catch (e) {
+    const msg = e?.name === "AbortError" ? "OpenAI timeout" : (e?.message || String(e));
+    return { ok: false, error: msg };
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/* ===============================
+   Builders (spec + files + edit)
+   =============================== */
+
+function fallbackSpecFromIdea(prompt, templateId, theme) {
+  return {
+    title: "New TikTok Live Game",
+    templateId,
+    summary: prompt.slice(0, 240),
+    ui: {
+      orientation: "9:16",
+      theme,
+      screens: ["settings", "game"]
+    },
+    settings: [
+      { id: "roundSeconds", type: "number", label: "Round Length (seconds)", min: 15, max: 300, default: 60 },
+      { id: "difficulty", type: "select", label: "Difficulty", options: ["Easy", "Normal", "Hard"], default: "Normal" }
+    ],
+    chat: {
+      joinCommand: "!join",
+      commands: [
+        { command: "!join", effect: "Join the session" },
+        { command: "!spawn", effect: "Trigger a game action (varies by game)" }
+      ]
+    },
+    scoring: {
+      enabled: true,
+      description: "Points awarded for participation and correct actions."
+    },
+    sfx: {
+      enabled: true,
+      cues: ["join", "action", "win", "lose"]
+    }
+  };
+}
+
+function validateFiles(files) {
+  return (
+    files &&
+    typeof files === "object" &&
+    typeof files["index.html"] === "string" &&
+    typeof files["style.css"] === "string" &&
+    typeof files["game.js"] === "string"
+  );
+}
+
+function buildSystemRules(builderRules = "") {
+  // Your mandatory TikTok connection example will be sent from the builder as builderRules.
+  // We enforce JSON-only output at the system level too.
+  return `
+You are a senior HTML/CSS/JS game developer.
+Return ONLY valid JSON. No markdown. No backticks.
+
+${builderRules ? "BUILDER RULES:\n" + builderRules : ""}
+`.trim();
+}
+
+async function generateSpecWithAI({ prompt, templateId, theme, builderRules }) {
+  const model = String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim();
   const timeoutMs = getTimeoutMs();
-  const resp = await callOpenAIResponses({
-    apiKey,
-    model,
-    maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_SPEC || 750),
-    prompt,
-    timeoutMs,
-  });
+  const temperature = getTemperature();
 
-  const txt = extractTextFromResponses(resp).trim();
-  const parsed = safeJsonParseMaybe(txt);
+  const system = buildSystemRules(builderRules);
+  const user = `
+Create a detailed game SPEC as JSON.
 
-  const out = fallbackSpecFromIdea(idea, t);
-  if (isObj(parsed)) Object.assign(out, parsed);
+Constraints:
+- Must be a TikTok LIVE interactive game
+- Must be 9:16 portrait
+- Must include: title, one-liner, howToPlay for host and chat, settings list, chat commands mapping, scoring, rounds, sound cues, UI layout notes.
+- Must reference theme colors passed in.
+- Output JSON object keys: title, subtitle, oneLiner, templateId, theme, howToPlay, settings, chat, host, scoring, rounds, sfx, ui
 
-  // Hard safety normalization
-  if (!Array.isArray(out.howToPlay)) out.howToPlay = base.howToPlay;
-  if (!isObj(out.defaultSettings)) out.defaultSettings = base.defaultSettings;
-  if (!isObj(out.commands)) out.commands = base.commands;
-  if (!isObj(out.visuals)) out.visuals = base.visuals;
+Inputs:
+templateId: ${templateId}
+theme: ${JSON.stringify(theme)}
+prompt: ${JSON.stringify(prompt)}
+`.trim();
 
-  out.title = safeStr(out.title || base.title, 80) || base.title;
-  out.subtitle = safeStr(out.subtitle || base.subtitle, 120) || base.subtitle;
-  out.oneSentence = safeStr(out.oneSentence || base.oneSentence, 200) || base.oneSentence;
-  out.archetype = safeStr(out.archetype || base.archetype, 40) || base.archetype;
+  const r = await openaiJson({ model, system, user, timeoutMs, temperature });
+  if (!r.ok) return { ok: false, error: r.error, raw: r.raw };
 
-  return out;
+  // Light normalize
+  const spec = r.json;
+  spec.templateId = spec.templateId || templateId;
+  spec.theme = theme;
+
+  return { ok: true, spec };
 }
 
-async function editSpecWithOpenAI({ apiKey, model, spec, changeRequest }) {
-  const nonce = crypto.randomUUID();
-
-  const prompt = [
-    "Return ONLY valid JSON. No markdown.",
-    "You will receive an existing spec JSON and an edit request.",
-    "Output the FULL updated spec JSON (same keys), making ONLY the requested changes.",
-    "Keep it compact; do not add huge text blocks.",
-    "",
-    `NONCE: ${nonce}`,
-    "",
-    "Edit request:",
-    safeStr(changeRequest, 800),
-    "",
-    "Existing spec JSON:",
-    stableJson(spec, 30000),
-  ].join("\n");
-
+async function generateFilesWithAI({ prompt, templateId, theme, spec, builderRules }) {
+  const model = String(process.env.OPENAI_MODEL_BUILD || "gpt-4o-mini").trim();
   const timeoutMs = getTimeoutMs();
-  const resp = await callOpenAIResponses({
-    apiKey,
-    model,
-    maxOutputTokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS_SPEC || 750),
-    prompt,
-    timeoutMs,
-  });
+  const temperature = getTemperature();
 
-  const txt = extractTextFromResponses(resp).trim();
-  const edited = safeJsonParseMaybe(txt);
-  if (!isObj(edited)) return spec;
-  return edited;
+  const system = buildSystemRules(builderRules);
+  const user = `
+Generate a COMPLETE professional game as JSON with exactly 3 keys:
+- "index.html"
+- "style.css"
+- "game.js"
+
+Rules:
+- No markdown, only JSON.
+- index.html must reference style.css and game.js.
+- The game must implement: settings screen → connect TikTok Live ID → start → game screen.
+- Must be 9:16 responsive and polished.
+- Must use the TikTokClient connect pattern provided in the builder rules.
+- Must NOT include external CDN Tailwind. Use hand-written CSS.
+- Must include SFX hooks with WebAudio or <audio> (no copyrighted assets; use simple synth/beeps if needed).
+- Must include clear on-screen directions overlay with transparent background.
+- Must cache profile pics in JS map when used.
+
+Inputs:
+templateId: ${templateId}
+theme: ${JSON.stringify(theme)}
+spec: ${JSON.stringify(spec)}
+prompt: ${JSON.stringify(prompt)}
+`.trim();
+
+  const r = await openaiJson({ model, system, user, timeoutMs, temperature });
+  if (!r.ok) return { ok: false, error: r.error, raw: r.raw };
+
+  const files = r.json;
+  if (!validateFiles(files)) {
+    return { ok: false, error: "AI returned JSON but missing required files keys", raw: r.raw };
+  }
+  return { ok: true, files };
 }
 
-// -----------------------------
-// Routes
-// -----------------------------
-function listEndpoints() {
-  // This is only to help the builder detect contract mode.
-  return [
-    "GET /health",
-    "GET /api/models",
-    "POST /api/plan",
-    "POST /api/generate",
-    "POST /api/build",
-    "POST /api/edit",
-  ];
+async function editFilesWithAI({ editPrompt, theme, files, builderRules }) {
+  const model = String(process.env.OPENAI_MODEL_BUILD || "gpt-4o-mini").trim();
+  const timeoutMs = getTimeoutMs();
+  const temperature = getTemperature();
+
+  const system = buildSystemRules(builderRules);
+  const user = `
+You will receive existing files for a TikTok Live game.
+Apply the edit request and return ONLY JSON with exactly:
+- "index.html"
+- "style.css"
+- "game.js"
+
+Edit request:
+${JSON.stringify(editPrompt)}
+
+Theme:
+${JSON.stringify(theme)}
+
+Existing files:
+index.html: ${JSON.stringify(files["index.html"])}
+style.css: ${JSON.stringify(files["style.css"])}
+game.js: ${JSON.stringify(files["game.js"])}
+
+Rules:
+- Keep TikTok connection pattern intact.
+- Keep settings/connect/start flow intact.
+- Keep 9:16 responsive.
+- Fix issues cleanly; no placeholders.
+`.trim();
+
+  const r = await openaiJson({ model, system, user, timeoutMs, temperature });
+  if (!r.ok) return { ok: false, error: r.error, raw: r.raw };
+
+  const outFiles = r.json;
+  if (!validateFiles(outFiles)) {
+    return { ok: false, error: "AI edit returned JSON but missing required file keys", raw: r.raw };
+  }
+  return { ok: true, files: outFiles };
 }
 
-app.get("/health", (_req, res) => {
+/* ===============================
+   Routes
+   =============================== */
+
+app.get("/api/ping", noStore, (_req, res) => {
   res.json({
     ok: true,
-    service: "chattok-game-builder-api",
-    uptimeSec: Math.round(process.uptime()),
+    name: "chattok-builder-api",
     time: new Date().toISOString(),
-    endpoints: listEndpoints(), // ✅ builder contract detection needs this
   });
 });
 
-app.get("/api/models", (_req, res) => {
+app.get("/api/models", noStore, (_req, res) => {
   res.json({
     ok: true,
-    models: { spec: process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini" },
+    models: {
+      spec: process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini",
+      build: process.env.OPENAI_MODEL_BUILD || "gpt-4o-mini",
+    },
     timeoutMs: getTimeoutMs(),
     temperature: getTemperature(),
   });
 });
 
-// /api/plan
-app.post("/api/plan", noStore, async (req, res) => {
+app.get("/api/routes", noStore, (_req, res) => {
+  res.json({ ok: true, routes: listRoutes(app) });
+});
+
+// PLAN (alias SPEC)
+async function planHandler(req, res) {
   const requestId = crypto.randomUUID();
   try {
     const prompt = safeStr(req.body?.prompt || req.body?.idea || req.body?.text || "");
@@ -550,38 +384,34 @@ app.post("/api/plan", noStore, async (req, res) => {
 
     const templateId = safeStr(req.body?.templateId || req.body?.template || "arena", 50).toLowerCase();
     const theme = normalizeTheme(req.body?.theme || req.body?.colors || {});
-    const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
+    const builderRules = safeStr(req.body?.builderRules || "", 30000);
 
     let spec;
     let usedFallback = false;
 
-    if (apiKey) {
-      try {
-        spec = await generateSpec({
-          apiKey,
-          model: String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim(),
-          idea: prompt,
-          templateId,
-        });
-      } catch (e) {
-        console.warn(`[${requestId}] Plan OpenAI failed; using fallback:`, e?.message || e);
-        spec = fallbackSpecFromIdea(prompt, templateId);
+    const client = getOpenAIClient();
+    if (client) {
+      const r = await generateSpecWithAI({ prompt, templateId, theme, builderRules });
+      if (r.ok) spec = r.spec;
+      else {
         usedFallback = true;
+        spec = fallbackSpecFromIdea(prompt, templateId, theme);
       }
     } else {
-      spec = fallbackSpecFromIdea(prompt, templateId);
       usedFallback = true;
+      spec = fallbackSpecFromIdea(prompt, templateId, theme);
     }
 
     return res.json({
       ok: true,
       requestId,
+      echoPrompt: prompt,
       spec,
       usedFallback,
       planText: usedFallback
-        ? "Fallback plan used (OpenAI unavailable). Spec is a safe default you can still build from."
+        ? "Fallback plan used (OpenAI unavailable or failed)."
         : "Plan generated successfully.",
-      context: { spec, templateId, theme },
+      context: { templateId, theme },
     });
   } catch (err) {
     const status = err.status || 500;
@@ -591,103 +421,48 @@ app.post("/api/plan", noStore, async (req, res) => {
       error: err.message || "Plan failed",
     });
   }
-});
-
-// -----------------------------
-// game.js builder (template-first, spec-driven)
-// -----------------------------
-function buildGameJs({ spec }) {
-  const s = isObj(spec) ? spec : fallbackSpecFromIdea("", "arena");
-  let js = String(TEMPLATES.js || "");
-  const specJson = stableJson(s, 50000);
-  js = js.replaceAll("__SPEC_JSON__", specJson);
-  return js;
 }
 
-async function generateHandler(req, res) {
+app.post("/api/plan", noStore, planHandler);
+app.post("/api/spec", noStore, planHandler); // alias for your builder defaults
+
+// BUILD
+app.post("/api/build", noStore, async (req, res) => {
   const requestId = crypto.randomUUID();
   try {
-    const stage = safeStr(req.body?.stage || "bundle", 20).toLowerCase();
+    const prompt = safeStr(req.body?.prompt || req.body?.idea || req.body?.text || "");
+    assert(prompt, "Missing prompt");
+
     const templateId = safeStr(req.body?.templateId || req.body?.template || "arena", 50).toLowerCase();
     const theme = normalizeTheme(req.body?.theme || req.body?.colors || {});
-    const prompt = safeStr(req.body?.prompt || req.body?.idea || "");
+    const builderRules = safeStr(req.body?.builderRules || "", 30000);
 
-    const ctx = isObj(req.body?.context) ? req.body.context : {};
-    const specFromCtx = isObj(ctx.spec) ? ctx.spec : null;
-    const specFromTop = isObj(req.body?.spec) ? req.body.spec : null;
-    const planObj = isObj(req.body?.plan) ? req.body.plan : null;
-    const specFromPlan = isObj(planObj?.spec) ? planObj.spec : (isObj(planObj) ? planObj : null);
+    const incomingSpec = req.body?.spec && typeof req.body.spec === "object" ? req.body.spec : null;
 
-    let spec = specFromCtx || specFromTop || specFromPlan;
-
+    // Ensure we have a spec (AI or fallback)
+    let spec = incomingSpec;
     if (!spec) {
-      assert(prompt, "Missing plan/spec/context OR prompt");
-      const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
-      if (apiKey) {
-        try {
-          spec = await generateSpec({
-            apiKey,
-            model: String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim(),
-            idea: prompt,
-            templateId,
-          });
-        } catch (e) {
-          console.warn(`[${requestId}] Spec OpenAI failed; using fallback:`, e?.message || e);
-          spec = fallbackSpecFromIdea(prompt, templateId);
-        }
-      } else {
-        spec = fallbackSpecFromIdea(prompt, templateId);
-      }
+      const r = await generateSpecWithAI({ prompt, templateId, theme, builderRules });
+      spec = r.ok ? r.spec : fallbackSpecFromIdea(prompt, templateId, theme);
     }
 
-    if (stage === "css") {
-      const css = injectThemeTokens(TEMPLATES.css, theme);
-      validateNoPlaceholders(css, "style.css");
-      return res.json({
-        ok: true,
+    const out = await generateFilesWithAI({ prompt, templateId, theme, spec, builderRules });
+    if (!out.ok) {
+      return res.status(500).json({
+        ok: false,
         requestId,
-        stage: "css",
-        file: { name: "style.css", content: css },
-        context: { spec, templateId },
+        echoPrompt: prompt,
+        error: out.error || "Build failed",
+        raw: out.raw || null,
       });
     }
-
-    if (stage === "html") {
-      const html = renderIndexHtml({ spec, theme });
-      return res.json({
-        ok: true,
-        requestId,
-        stage: "html",
-        file: { name: "index.html", content: html },
-        context: { spec, templateId },
-      });
-    }
-
-    if (stage === "js") {
-      const js = buildGameJs({ spec });
-      return res.json({
-        ok: true,
-        requestId,
-        stage: "js",
-        file: { name: "game.js", content: js },
-        context: { spec, templateId },
-      });
-    }
-
-    // bundle
-    const html = renderIndexHtml({ spec, theme });
-    const css = injectThemeTokens(TEMPLATES.css, theme);
-    validateNoPlaceholders(css, "style.css");
-    const js = buildGameJs({ spec });
 
     return res.json({
       ok: true,
       requestId,
-      stage: "bundle",
-      index_html: html,
-      style_css: css,
-      game_js: js,
-      context: { spec, templateId },
+      echoPrompt: prompt,
+      spec,
+      files: out.files,
     });
   } catch (err) {
     const status = err.status || 500;
@@ -697,71 +472,58 @@ async function generateHandler(req, res) {
       error: err.message || "Build failed",
     });
   }
-}
+});
 
-app.post("/api/generate", noStore, generateHandler);
-app.post("/api/build", noStore, generateHandler);
-
-// Apply limited edits (builder expects patches[])
+// EDIT
 app.post("/api/edit", noStore, async (req, res) => {
   const requestId = crypto.randomUUID();
   try {
-    const remainingEdits = Number(req.body?.remainingEdits ?? 0);
-    assert(Number.isFinite(remainingEdits) && remainingEdits > 0, "No edits remaining");
-
-    const changeRequest = safeStr(req.body?.changeRequest || "");
-    assert(changeRequest, "Missing changeRequest");
+    const editPrompt = safeStr(req.body?.editPrompt || req.body?.prompt || "");
+    assert(editPrompt, "Missing editPrompt");
 
     const theme = normalizeTheme(req.body?.theme || req.body?.colors || {});
-    const templateId = safeStr(req.body?.templateId || "arena", 50).toLowerCase();
-    const currentFiles = isObj(req.body?.currentFiles) ? req.body.currentFiles : {};
-    const currentJs = String(currentFiles["game.js"] || "");
-    const currentSpec = extractSpecFromGameJs(currentJs);
+    const builderRules = safeStr(req.body?.builderRules || "", 30000);
 
-    let spec = currentSpec || fallbackSpecFromIdea(changeRequest, templateId);
+    const files = req.body?.files;
+    assert(files && typeof files === "object", "Missing files");
+    assert(typeof files["index.html"] === "string", "Missing index.html");
+    assert(typeof files["style.css"] === "string", "Missing style.css");
+    assert(typeof files["game.js"] === "string", "Missing game.js");
 
-    const apiKey = String(process.env.OPENAI_API_KEY || "").trim();
-    if (apiKey && currentSpec) {
-      try {
-        spec = await editSpecWithOpenAI({
-          apiKey,
-          model: String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim(),
-          spec,
-          changeRequest,
-        });
-      } catch (e) {
-        console.warn(`[${requestId}] Edit OpenAI failed; keeping existing spec:`, e?.message || e);
-        spec = currentSpec;
-      }
+    const out = await editFilesWithAI({ editPrompt, theme, files, builderRules });
+    if (!out.ok) {
+      return res.status(500).json({
+        ok: false,
+        requestId,
+        echoPrompt: editPrompt,
+        error: out.error || "Edit failed",
+        raw: out.raw || null,
+      });
     }
-
-    const patches = [];
-
-    patches.push({ name: "index.html", content: renderIndexHtml({ spec, theme }) });
-
-    const css = injectThemeTokens(TEMPLATES.css, theme);
-    validateNoPlaceholders(css, "style.css");
-    patches.push({ name: "style.css", content: css });
-
-    patches.push({ name: "game.js", content: buildGameJs({ spec }) });
 
     return res.json({
       ok: true,
       requestId,
-      patches,
-      remainingEdits: Math.max(0, remainingEdits - 1),
-      context: { spec, templateId },
+      echoPrompt: editPrompt,
+      files: out.files,
     });
   } catch (err) {
     const status = err.status || 500;
-    return res.status(status).json({ ok: false, requestId, error: err.message || "Edit failed" });
+    return res.status(status).json({
+      ok: false,
+      requestId,
+      error: err.message || "Edit failed",
+    });
   }
 });
 
-// -----------------------------
-// Startup (exactly one listen)
-// -----------------------------
-const PORT = Number(process.env.PORT || 3000);
+/* ===============================
+   Start
+   =============================== */
+
+const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-  console.log(`ChatTok Builder API listening on ${PORT}`);
+  console.log(`chattok-builder-api listening on :${PORT}`);
+  console.log("Routes:", JSON.stringify(listRoutes(app), null, 2));
 });

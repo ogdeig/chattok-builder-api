@@ -1,1274 +1,763 @@
 /* =========================================================
-   ChatTok Game Template — game.template.js (NO DEMO MODE)
-   - No simulated TikTok events. No “demo gameplay”.
-   - Game starts ONLY after successful TikTok connection.
-   - Uses TikTokClient provided by ChatTokGaming (do not edit tiktok-client.js).
-   - AI fills ONLY the AI_REGION.
-
-   Injected server-side:
-   const SPEC = __SPEC_JSON__;
+   ChatTok Live Game — game.js (template-first, spec-driven)
+   - Uses SPEC JSON injected by server
+   - Works in Practice mode without TikTok
+   - Uses TikTokClient + proto when running on ChatTok Gaming platform
+   - Keeps required TikTok connection example section (DO NOT REMOVE)
 ========================================================= */
 
-const SPEC = __SPEC_JSON__;
+/* Injected spec (do not edit by hand in generated games) */
+const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
-/* =========================================================
-   DOM refs (must exist in index.template.html)
-========================================================= */
-const setupOverlay = document.getElementById("setupOverlay");
-const startGameBtn = document.getElementById("startGameBtn");
-const liveIdInput = document.getElementById("liveIdInput");
-const statusText = document.getElementById("statusText");
-const statusTextInGame = document.getElementById("statusTextInGame");
-const gameRoot = document.getElementById("gameRoot");
+(() => {
+  "use strict";
 
-/* =========================================================
-   Utilities
-========================================================= */
-function clamp(v, a, b) { v = Number(v) || 0; return Math.max(a, Math.min(b, v)); }
-function nowMs() { return Date.now(); }
-function rand(a, b) { return a + Math.random() * (b - a); }
-function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-function safeText(s, max = 80) { return String(s || "").trim().replace(/\s+/g, " ").slice(0, max); }
+  const $ = (id) => document.getElementById(id);
 
-function showOverlay() { if (setupOverlay) setupOverlay.style.display = ""; }
-function hideOverlay() { if (setupOverlay) setupOverlay.style.display = "none"; }
+  const bootErrorEl = $("bootError");
+  const bootErrorText = $("bootErrorText");
 
-function setStatus(msg, ok = true) {
-  const t = String(msg || "");
-  if (statusText) {
-    statusText.textContent = t;
-    statusText.style.color = ok ? "rgba(255,255,255,.9)" : "rgba(255,120,120,.95)";
-  }
-  if (statusTextInGame) {
-    statusTextInGame.textContent = t;
-    statusTextInGame.style.color = ok ? "rgba(255,255,255,.78)" : "rgba(255,120,120,.95)";
-  }
-  // update pill class if present
-  const pill = document.getElementById("connPill");
-  if (pill) {
-    if (/connected/i.test(t)) pill.classList.add("connected");
-    else pill.classList.remove("connected");
-  }
-}
+  const setupOverlay = $("setupOverlay");
+  const liveIdInput = $("liveIdInput");
+  const startBtn = $("startGameBtn");
+  const practiceBtn = $("practiceBtn");
+  const overlayStartBtn = $("overlayStartBtn");
+  const overlayPracticeBtn = $("overlayPracticeBtn");
 
-/* =========================================================
-   Robust TikTok message shape helpers (supports many shapes)
-========================================================= */
-function getChatTextFromMessage(msg) {
-  const m = msg || {};
-  const t = m.content ?? m.comment ?? m.text ?? m.message ?? m.msg ?? "";
-  return String(t || "").trim();
-}
+  const statusText = $("statusText");
+  const statusTextInGame = $("statusTextInGame");
 
-function firstUrl(v) {
-  if (!v) return "";
-  if (typeof v === "string") return v;
-  if (Array.isArray(v)) return typeof v[0] === "string" ? v[0] : "";
-  return "";
-}
+  const canvas = $("gameCanvas");
+  const ctx = canvas.getContext("2d", { alpha: true });
 
-function getAvatarUrlFromUser(u) {
-  if (!u || typeof u !== "object") return "";
-  const direct = firstUrl(u.profilePictureUrl || u.profilePicture || u.avatar || u.pfp || u.avatarUrl);
-  if (direct) return direct;
+  const hudRound = $("hudRound");
+  const hudTime = $("hudTime");
+  const hudShots = $("hudShots");
+  const hudHits = $("hudHits");
 
-  const a1 = u.avatarThumb || u.avatarthumb || null;
-  if (a1) {
-    const list =
-      a1.urlList || a1.urlListList || a1.urllistList || a1.urllist || a1.url_list || a1.url_list_list;
-    const pick1 = firstUrl(list);
-    if (pick1) return pick1;
-  }
-  return "";
-}
+  const scoreboardEl = $("scoreboard");
+  const flagsEl = $("flags");
+  const flashLayer = $("flashLayer");
 
-function getUserFromMessage(msg) {
-  const m = msg || {};
-  const u = m.user || m.userInfo || m.userinfo || m.sender || m.from || {};
-  const userId =
-    String(u.userId ?? u.userid ?? u.id ?? m.userId ?? m.userid ?? m.user_id ?? "") || "";
-  const uniqueId =
-    String(u.uniqueId ?? u.uniqueid ?? u.username ?? u.handle ?? m.uniqueId ?? m.uniqueid ?? "") ||
-    "";
-  const nickname =
-    String(u.nickname ?? u.displayName ?? u.name ?? m.nickname ?? "") || uniqueId || "viewer";
-  const avatar = getAvatarUrlFromUser(u) || firstUrl(m.profilePictureUrl) || "";
-  return { userId, uniqueId, nickname, avatar };
-}
-
-function normalizeChat(m) {
-  const user = getUserFromMessage(m);
-  return {
-    type: "chat",
-    userId: user.userId,
-    uniqueId: user.uniqueId,
-    nickname: user.nickname,
-    pfp: user.avatar || "",
-    text: getChatTextFromMessage(m),
-    raw: m,
-  };
-}
-
-function normalizeLike(m) {
-  const user = getUserFromMessage(m);
-  const count =
-    Number(m.likeCount ?? m.likecount ?? m.count ?? m.totalLikeCount ?? m.totalLikecount ?? 1) || 1;
-  return {
-    type: "like",
-    userId: user.userId,
-    uniqueId: user.uniqueId,
-    nickname: user.nickname,
-    pfp: user.avatar || "",
-    count,
-    raw: m,
-  };
-}
-
-function normalizeGift(m) {
-  const user = getUserFromMessage(m);
-  const giftName = String(m.giftName ?? m.giftname ?? m.gift?.name ?? m.gift?.giftName ?? "Gift");
-  const repeat = Number(m.repeatCount ?? m.repeatcount ?? m.repeat ?? m.count ?? 1) || 1;
-  const diamond =
-    Number(m.diamondCount ?? m.diamondcount ?? m.diamonds ?? m.gift?.diamondCount ?? 0) || 0;
-  return {
-    type: "gift",
-    userId: user.userId,
-    uniqueId: user.uniqueId,
-    nickname: user.nickname,
-    pfp: user.avatar || "",
-    giftName,
-    repeat,
-    diamond,
-    raw: m,
-  };
-}
-
-function normalizeJoin(m) {
-  const user = getUserFromMessage(m);
-  return {
-    type: "join",
-    userId: user.userId,
-    uniqueId: user.uniqueId,
-    nickname: user.nickname,
-    pfp: user.avatar || "",
-    raw: m,
-  };
-}
-
-/* =========================================================
-   UI build (matches style.template.css stage/topbar/playcard/hud)
-========================================================= */
-let canvas, ctx;
-let W = 0, H = 0, DPR = 1;
-let ui = {};
-
-function clearEl(el) {
-  if (!el) return;
-  while (el.firstChild) el.removeChild(el.firstChild);
-}
-
-function buildUI() {
-  if (!gameRoot) return;
-
-  clearEl(gameRoot);
-
-  const stage = document.createElement("div");
-  stage.className = "stage";
-
-  // Topbar
-  const topbar = document.createElement("div");
-  topbar.className = "topbar";
-
-  const brand = document.createElement("div");
-  brand.className = "brand";
-  const title = document.createElement("div");
-  title.className = "title";
-  title.textContent = safeText((SPEC && SPEC.title) || "ChatTok Game", 48);
-  const sub = document.createElement("div");
-  sub.className = "sub";
-  sub.textContent = safeText((SPEC && SPEC.subtitle) || "Connect to TikTok LIVE to start.", 90);
-  brand.appendChild(title);
-  brand.appendChild(sub);
-
-  const pill = document.createElement("div");
-  pill.id = "connPill";
-  pill.className = "pill";
-  pill.innerHTML = `<span class="dot"></span><strong>LIVE</strong><span id="pillStatus">Offline</span>`;
-
-  topbar.appendChild(brand);
-  topbar.appendChild(pill);
-
-  // Playcard
-  const playcard = document.createElement("div");
-  playcard.className = "playcard";
-
-  canvas = document.createElement("canvas");
-  canvas.className = "gameCanvas";
-  canvas.id = "gameCanvas";
-  playcard.appendChild(canvas);
-
-  // HUD
-  const hud = document.createElement("div");
-  hud.className = "hud";
-
-  const left = document.createElement("div");
-  left.className = "left";
-  left.innerHTML = `
-    <div class="stat"><div class="k">Score</div><div class="v" id="hudScore">0</div></div>
-    <div class="stat"><div class="k">Players</div><div class="v" id="hudPlayers">0</div></div>
-  `;
-
-  const meterWrap = document.createElement("div");
-  meterWrap.style.flex = "1";
-  meterWrap.innerHTML = `
-    <div class="stat" style="margin-bottom:6px">
-      <div class="k">Power Meter (Likes)</div>
-    </div>
-    <div class="meter"><i id="hudMeter"></i></div>
-  `;
-
-  const right = document.createElement("div");
-  right.className = "right";
-  right.innerHTML = `
-    <div class="stat"><div class="k">Likes</div><div class="v" id="hudLikes">0</div></div>
-    <div class="stat"><div class="k">Gifts</div><div class="v" id="hudGifts">0</div></div>
-  `;
-
-  hud.appendChild(left);
-  hud.appendChild(meterWrap);
-  hud.appendChild(right);
-
-  // Flags container exists in CSS, create only if used
-  const flags = document.createElement("div");
-  flags.id = "flags";
-
-  stage.appendChild(topbar);
-  stage.appendChild(playcard);
-  stage.appendChild(hud);
-
-  gameRoot.appendChild(stage);
-  gameRoot.appendChild(flags);
-
-  // context + resize
-  try {
-    ctx = canvas.getContext("2d", { alpha: true, desynchronized: true });
-  } catch {
-    ctx = canvas.getContext("2d");
-  }
-
-  resizeCanvas();
-  window.addEventListener("resize", resizeCanvas, { passive: true });
-
-  ui = {
-    hudScore: document.getElementById("hudScore"),
-    hudPlayers: document.getElementById("hudPlayers"),
-    hudLikes: document.getElementById("hudLikes"),
-    hudGifts: document.getElementById("hudGifts"),
-    hudMeter: document.getElementById("hudMeter"),
-    flagsEl: document.getElementById("flags"),
-    pillStatus: document.getElementById("pillStatus"),
-  };
-}
-
-function resizeCanvas() {
-  if (!canvas) return;
-  const r = canvas.getBoundingClientRect();
-  DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-  W = Math.max(1, Math.floor(r.width * DPR));
-  H = Math.max(1, Math.floor(r.height * DPR));
-  if (canvas.width !== W || canvas.height !== H) {
-    canvas.width = W;
-    canvas.height = H;
-  }
-}
-
-/* =========================================================
-   Optional flags (only used if AI/Spec wants notifications)
-========================================================= */
-function escapeHtml(s) {
-  return String(s || "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
-}
-function initials(name) {
-  const s = String(name || "").trim();
-  if (!s) return "?";
-  const parts = s.split(/\s+/).slice(0, 2);
-  return parts.map((p) => p[0]).join("").toUpperCase();
-}
-function flagNotify({ who, msg, pfp, cls }) {
-  if (!state.uiFlagsEnabled) return;
-  if (!ui.flagsEl) return;
-
-  const wrap = document.createElement("div");
-  wrap.className = "flag" + (cls ? " " + String(cls) : "");
-
-  const pfpWrap = document.createElement("div");
-  pfpWrap.className = "pfp";
-
-  const img = document.createElement("img");
-  img.alt = "";
-  img.decoding = "async";
-  img.loading = "lazy";
-
-  const fallback = document.createElement("div");
-  fallback.style.width = "100%";
-  fallback.style.height = "100%";
-  fallback.style.display = "grid";
-  fallback.style.placeItems = "center";
-  fallback.style.fontWeight = "900";
-  fallback.style.fontSize = "12px";
-  fallback.style.letterSpacing = ".6px";
-  fallback.style.color = "rgba(255,255,255,.92)";
-  fallback.textContent = initials(who || "");
-
-  const hasPfp = typeof pfp === "string" && pfp.trim().length > 0;
-  if (hasPfp) {
-    img.src = pfp.trim();
-    img.onerror = () => {
-      pfpWrap.innerHTML = "";
-      pfpWrap.appendChild(fallback);
-    };
-    pfpWrap.appendChild(img);
-  } else {
-    pfpWrap.appendChild(fallback);
-  }
-
-  const text = document.createElement("div");
-  text.className = "txt";
-  text.innerHTML =
-    `<div class="who">${escapeHtml(who || "")}</div>` +
-    `<div class="msg">${escapeHtml(msg || "")}</div>`;
-
-  wrap.appendChild(pfpWrap);
-  wrap.appendChild(text);
-
-  ui.flagsEl.prepend(wrap);
-  while (ui.flagsEl.childElementCount > 6) ui.flagsEl.removeChild(ui.flagsEl.lastChild);
-
-  setTimeout(() => {
-    try { wrap.remove(); } catch {}
-  }, 3200);
-}
-
-/* =========================================================
-   SETTINGS (chat command variables + optional share triggers)
-   - Collapsible to avoid clutter
-========================================================= */
-function readSetting(id, fallback) {
-  const el = document.getElementById(id);
-  if (!el) return fallback;
-  if (el.type === "checkbox") return !!el.checked;
-  return String(el.value || "").trim() || fallback;
-}
-
-function ensureSettingsUI() {
-  // Add a collapsible settings panel inside the overlay-card (only once).
-  const card = setupOverlay ? setupOverlay.querySelector(".overlay-card") : null;
-  if (!card) return;
-  if (card.querySelector("#ctSettings")) return;
-
-  const details = document.createElement("details");
-  details.id = "ctSettings";
-  details.style.marginTop = "10px";
-  details.style.border = "1px solid rgba(255,255,255,.10)";
-  details.style.borderRadius = "14px";
-  details.style.padding = "10px";
-  details.style.background = "rgba(0,0,0,.18)";
-
-  const summary = document.createElement("summary");
-  summary.textContent = "Game Settings (optional)";
-  summary.style.cursor = "pointer";
-  summary.style.fontWeight = "900";
-  summary.style.color = "rgba(255,255,255,.9)";
-  summary.style.listStyle = "none";
-
-  const box = document.createElement("div");
-  box.style.marginTop = "10px";
-  box.style.display = "grid";
-  box.style.gap = "10px";
-
-  // Only show these if spec suggests a command-driven action.
-  const needsCommand = !!(SPEC && (SPEC.requiresCommand || SPEC.commandDriven || SPEC.chatCommand));
-  const showCommandFields = needsCommand || true; // template supports it without forcing; kept in collapsible
-
-  if (showCommandFields) {
-    box.innerHTML = `
-      <div class="row">
-        <label class="label" for="cmdAction">Chat command (action)</label>
-        <input id="cmdAction" class="input" placeholder="Example: fire" autocomplete="off" />
-      </div>
-
-      <div class="row">
-        <label class="label" for="cmdJoin">Chat command (join)</label>
-        <input id="cmdJoin" class="input" placeholder="Example: join" autocomplete="off" />
-      </div>
-
-      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:rgba(255,255,255,.84)">
-          <input id="allowShareForAction" type="checkbox" />
-          Allow Shares to trigger ACTION (if available)
-        </label>
-
-        <label style="display:flex;gap:8px;align-items:center;font-size:13px;color:rgba(255,255,255,.84)">
-          <input id="allowShareForJoin" type="checkbox" />
-          Allow Shares to trigger JOIN (if available)
-        </label>
-      </div>
-    `;
-  }
-
-  details.appendChild(summary);
-  details.appendChild(box);
-  card.appendChild(details);
-
-  // Apply defaults from AI config after insert
-  setTimeout(() => {
-    const a = document.getElementById("cmdAction");
-    const j = document.getElementById("cmdJoin");
-    const sA = document.getElementById("allowShareForAction");
-    const sJ = document.getElementById("allowShareForJoin");
-
-    if (a && !a.value) a.value = AI.actionKeyword;
-    if (j && !j.value) j.value = AI.joinKeyword;
-    if (sA) sA.checked = !!AI.allowShareForActionDefault;
-    if (sJ) sJ.checked = !!AI.allowShareForJoinDefault;
-  }, 0);
-}
-
-/* =========================================================
-   GAME ENGINE (NO GAMEPLAY UNTIL CONNECTED)
-========================================================= */
-let rafId = 0;
-let lastT = 0;
-
-const state = {
-  connected: false,
-  pendingStart: false,
-  gameStarted: false,
-
-  // counters
-  score: 0,
-  players: new Map(), // userId -> player
-  likes: 0,
-  gifts: 0,
-
-  // power meter from likes
-  power: 0,           // 0..1
-  powerBoostUntil: 0, // ms
-
-  // entities (only active after game start)
-  meteors: [],
-  shots: [],
-  explosions: [],
-
-  // idle visuals (allowed, not gameplay)
-  stars: [],
-
-  // UI feature flags
-  uiFlagsEnabled: false,
-
-  // command settings (loaded at start)
-  cmdAction: "",
-  cmdJoin: "",
-  shareAction: false,
-  shareJoin: false,
-};
-
-function resetGameState() {
-  state.score = 0;
-  state.players.clear();
-  state.likes = 0;
-  state.gifts = 0;
-  state.power = 0;
-  state.powerBoostUntil = 0;
-  state.meteors = [];
-  state.shots = [];
-  state.explosions = [];
-}
-
-function updateHUD() {
-  if (ui.hudScore) ui.hudScore.textContent = String(state.score);
-  if (ui.hudPlayers) ui.hudPlayers.textContent = String(state.players.size);
-  if (ui.hudLikes) ui.hudLikes.textContent = String(state.likes);
-  if (ui.hudGifts) ui.hudGifts.textContent = String(state.gifts);
-  if (ui.hudMeter) ui.hudMeter.style.width = `${Math.round(clamp(state.power, 0, 1) * 100)}%`;
-  if (ui.pillStatus) ui.pillStatus.textContent = state.connected ? "Connected" : "Offline";
-}
-
-function ensureStars() {
-  if (state.stars.length) return;
-  const count = 90;
-  for (let i = 0; i < count; i++) {
-    state.stars.push({
-      x: Math.random(),
-      y: Math.random(),
-      z: rand(0.2, 1.0),
-      tw: rand(0, Math.PI * 2),
-    });
-  }
-}
-
-function spawnPlayer(userId, nickname, pfp) {
-  if (!userId) return;
-  if (state.players.has(userId)) return;
-
-  const idx = state.players.size;
-  const col = pick(AI.playerColors);
-
-  state.players.set(userId, {
-    id: userId,
-    name: safeText(nickname || "viewer", 18),
-    pfp: pfp || "",
-    color: col,
-    slot: idx, // order of join
-    cooldown: 0,
-    shots: 0,
-  });
-
-  // Use flags only if enabled
-  flagNotify({ who: nickname, msg: "Joined!", pfp, cls: "" });
-  updateHUD();
-}
-
-function playerFire(userId, intensity = 1) {
-  const p = state.players.get(userId);
-  if (!p) return;
-  if (!state.gameStarted) return;
-  if (p.cooldown > 0) return;
-
-  // cooldown scales with power boost
-  const boosted = nowMs() < state.powerBoostUntil;
-  p.cooldown = boosted ? 0.08 : 0.18;
-
-  // fire from player's turret position
-  const turret = getTurretPosition(p.slot);
-  const speed = (boosted ? 860 : 720) * DPR;
-
-  const spread = boosted ? 0.18 : 0.10;
-  const shots = boosted ? 2 : 1;
-
-  for (let i = 0; i < shots; i++) {
-    const ang = -Math.PI / 2 + rand(-spread, spread);
-    state.shots.push({
-      x: turret.x,
-      y: turret.y,
-      vx: Math.cos(ang) * speed,
-      vy: Math.sin(ang) * speed,
-      r: 4 * DPR,
-      life: 0.9,
-      color: p.color,
-      owner: userId,
-      dmg: Math.max(1, Math.round(intensity)),
-    });
-  }
-
-  p.shots += 1;
-}
-
-function getTurretPosition(slot) {
-  const n = Math.max(1, state.players.size);
-  const i = clamp(slot, 0, n - 1);
-  const pad = 42 * DPR;
-  const x = pad + (i + 0.5) * ((W - pad * 2) / n);
-  const y = H - 88 * DPR;
-  return { x, y };
-}
-
-function spawnMeteor(power = 1) {
-  const r = clamp(rand(18, 42) * (0.9 + power * 0.18), 16, 88) * DPR;
-  const x = rand(r, W - r);
-  const y = -r - rand(0, 120 * DPR);
-  const vy = rand(140, 240) * DPR * (1 + power * 0.06);
-  const vx = rand(-40, 40) * DPR;
-
-  state.meteors.push({
-    x, y, vx, vy, r,
-    hp: Math.ceil((r / (20 * DPR)) * (1 + power * 0.25)),
-    rot: rand(0, Math.PI * 2),
-    rv: rand(-1.2, 1.2),
-  });
-}
-
-function explode(x, y, strength = 1) {
-  state.explosions.push({ x, y, t: 0, s: strength });
-}
-
-function nukeAll() {
-  if (!state.gameStarted) return;
-  // big gift event: clear most meteors, score bonus
-  const killed = state.meteors.length;
-  if (!killed) return;
-  for (const m of state.meteors) explode(m.x, m.y, 1.3);
-  state.meteors = [];
-  state.score += killed * 2;
-  flagNotify({ who: "GIFT", msg: "NUKE!", pfp: "", cls: "yellow" });
-  updateHUD();
-}
-
-/* =========================================================
-   Tick + Render
-========================================================= */
-function tick(t) {
-  rafId = requestAnimationFrame(tick);
-  const dt = clamp((t - lastT) / 1000, 0, 0.05);
-  lastT = t;
-
-  resizeCanvas();
-  ensureStars();
-
-  // always render idle background
-  renderBackground(dt);
-
-  if (!state.gameStarted) {
-    renderWaitingText();
-    updateHUD();
+  const required = [setupOverlay, liveIdInput, startBtn, practiceBtn, overlayStartBtn, overlayPracticeBtn, statusText, statusTextInGame, canvas, scoreboardEl, flagsEl, flashLayer];
+  if (required.some((x) => !x)) {
+    showBootError("Missing required HTML elements. Rebuild the game so index.html matches the template.");
     return;
   }
 
-  // === Active gameplay ONLY after beginGame() ===
-  updateGame(dt);
-  renderGame(dt);
-  updateHUD();
-}
+  const S = normalizeSpec(SPEC);
 
-function renderBackground(dt) {
-  if (!ctx) return;
-  ctx.clearRect(0, 0, W, H);
+  let mode = "idle"; // idle | practice | live
+  let connected = false;
+  let client = null;
 
-  // subtle star field (non-gameplay)
-  for (const s of state.stars) {
-    s.tw += dt * (0.6 + s.z * 0.8);
-    const x = s.x * W;
-    const y = s.y * H;
-    const a = 0.22 + 0.22 * Math.sin(s.tw);
-    const r = (1.2 + 1.6 * s.z) * DPR;
-    ctx.globalAlpha = a;
-    ctx.fillStyle = "white";
-    ctx.beginPath();
-    ctx.arc(x, y, r, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-}
+  let round = 1;
+  let timeLeft = S.defaultSettings.roundSeconds;
+  let timerHandle = null;
 
-function renderWaitingText() {
-  const msg = state.connected ? "Ready. Press Start to begin." : "Connect to TikTok LIVE to start.";
-  ctx.save();
-  ctx.fillStyle = "rgba(255,255,255,.92)";
-  ctx.font = `${Math.round(22 * DPR)}px system-ui,Segoe UI,Roboto,Arial`;
-  ctx.textAlign = "center";
-  ctx.fillText(msg, W * 0.5, H * 0.52);
+  const gridSize = clampInt(S.defaultSettings.gridSize, 6, 14);
+  const winGoal = clampInt(S.defaultSettings.winGoal, 5, 999);
 
-  ctx.fillStyle = "rgba(255,255,255,.70)";
-  ctx.font = `${Math.round(14 * DPR)}px system-ui,Segoe UI,Roboto,Arial`;
-  const hint = `Join: "${state.cmdJoin || AI.joinKeyword}" • Action: "${state.cmdAction || AI.actionKeyword}"`;
-  ctx.fillText(hint, W * 0.5, H * 0.52 + 26 * DPR);
-  ctx.restore();
-}
+  const board = new Array(gridSize * gridSize).fill(0);
+  const targets = new Set();
 
-function updateGame(dt) {
-  // spawn meteors
-  const power = 1 + state.score / 90;
-  state._spawnT = (state._spawnT || 0) - dt;
-  const boosted = nowMs() < state.powerBoostUntil;
-  const spawnEvery = boosted ? 0.34 : 0.48;
+  const users = new Map();
+  let totalShots = 0;
+  let totalHits = 0;
 
-  if (state._spawnT <= 0) {
-    state._spawnT = spawnEvery;
-    spawnMeteor(power);
-    if (boosted && Math.random() < 0.35) spawnMeteor(power);
+  const particles = [];
+  const ripples = [];
+  let likesBank = 0;
+
+  function setStatus(text) {
+    statusText.textContent = text;
+    statusTextInGame.textContent = text;
   }
 
-  // update players cooldown
-  for (const p of state.players.values()) {
-    if (p.cooldown > 0) p.cooldown -= dt;
+  function showOverlay(show) {
+    setupOverlay.style.display = show ? "flex" : "none";
   }
 
-  // update shots
-  for (let i = state.shots.length - 1; i >= 0; i--) {
-    const b = state.shots[i];
-    b.x += b.vx * dt;
-    b.y += b.vy * dt;
-    b.life -= dt;
-    if (b.life <= 0 || b.y < -60 || b.x < -60 || b.x > W + 60) state.shots.splice(i, 1);
+  function showBootError(message) {
+    try {
+      bootErrorText.innerHTML =
+        escapeHtml(message) +
+        "<div style='margin-top:10px;opacity:.85'>Missing scripts? The platform should inject <code>tiktok-client.js</code> and <code>proto</code>.</div>";
+      bootErrorEl.style.display = "flex";
+    } catch {}
   }
 
-  // update meteors
-  for (let i = state.meteors.length - 1; i >= 0; i--) {
-    const m = state.meteors[i];
-    m.x += m.vx * dt;
-    m.y += m.vy * dt;
-    m.rot += m.rv * dt;
-    if (m.y > H + m.r + 40) {
-      // meteor slipped through — penalty
-      state.meteors.splice(i, 1);
-      state.score = Math.max(0, state.score - 1);
-      continue;
+  function addFlag({ pfpUrl, line1, line2 }) {
+    const el = document.createElement("div");
+    el.className = "flag";
+    el.innerHTML = `
+      <div class="pfp">${pfpUrl ? `<img src="${escapeAttr(pfpUrl)}" alt="">` : ""}</div>
+      <div class="meta">
+        <div class="line1">${escapeHtml(line1)}</div>
+        <div class="line2">${escapeHtml(line2)}</div>
+      </div>
+    `;
+    flagsEl.prepend(el);
+    setTimeout(() => {
+      try { el.remove(); } catch {}
+      while (flagsEl.children.length > 6) flagsEl.lastChild?.remove();
+    }, 3400);
+  }
+
+  function flashWinner(user, text) {
+    const el = document.createElement("div");
+    el.className = "flashCard";
+    el.innerHTML = `
+      <div class="flashTop">
+        <div class="pfp">${user?.profilePictureUrl ? `<img src="${escapeAttr(user.profilePictureUrl)}" alt="">` : ""}</div>
+        <div>
+          <div class="flashName">${escapeHtml(user?.nickname || "Player")}</div>
+          <div style="opacity:.8;font-weight:900">${escapeHtml(text)}</div>
+        </div>
+      </div>
+      <div class="flashMsg">${escapeHtml(S.title)} • ${escapeHtml(S.visuals.hitEmoji)} ${escapeHtml(S.visuals.missEmoji)}</div>
+    `;
+    flashLayer.appendChild(el);
+    setTimeout(() => { try { el.remove(); } catch {} }, 950);
+  }
+
+  function updateHud() {
+    hudRound.textContent = String(round);
+    hudTime.textContent = formatTime(timeLeft);
+    hudShots.textContent = String(totalShots);
+    hudHits.textContent = String(totalHits);
+  }
+
+  function renderScoreboard() {
+    const arr = Array.from(users.values())
+      .sort((a, b) => (b.hits - a.hits) || (b.shots - a.shots))
+      .slice(0, 5);
+
+    scoreboardEl.innerHTML = "";
+    const card = document.createElement("div");
+    card.className = "scoreCard";
+    card.innerHTML = `<div class="scoreTitle">Top Hunters (Hits)</div>`;
+    for (const u of arr) {
+      const row = document.createElement("div");
+      row.className = "scoreRow";
+      row.innerHTML = `
+        <div class="pfp">${u.profilePictureUrl ? `<img src="${escapeAttr(u.profilePictureUrl)}" alt="">` : ""}</div>
+        <div class="nick">${escapeHtml(u.nickname || "Player")}</div>
+        <div class="val">${u.hits}</div>
+      `;
+      card.appendChild(row);
+    }
+    scoreboardEl.appendChild(card);
+  }
+
+  function resetRound() {
+    board.fill(0);
+    targets.clear();
+    totalShots = 0;
+    totalHits = 0;
+    likesBank = 0;
+
+    for (const u of users.values()) {
+      u.shots = 0;
+      u.hits = 0;
+      u.lastShotAt = 0;
+    }
+
+    placeTargetsRandom(12);
+    timeLeft = S.defaultSettings.roundSeconds;
+
+    particles.length = 0;
+    ripples.length = 0;
+
+    updateHud();
+    renderScoreboard();
+  }
+
+  function placeTargetsRandom(count) {
+    const c = clampInt(count, 6, Math.floor(gridSize * gridSize * 0.35));
+    let guard = 0;
+    while (targets.size < c && guard < 5000) {
+      guard++;
+      const idx = randInt(0, gridSize * gridSize - 1);
+      targets.add(idx);
     }
   }
 
-  // collisions shots vs meteors
-  for (let i = state.meteors.length - 1; i >= 0; i--) {
-    const m = state.meteors[i];
-    for (let j = state.shots.length - 1; j >= 0; j--) {
-      const b = state.shots[j];
-      const dx = m.x - b.x;
-      const dy = m.y - b.y;
-      const rr = (m.r + b.r);
-      if (dx * dx + dy * dy <= rr * rr) {
-        // hit
-        m.hp -= b.dmg;
-        state.shots.splice(j, 1);
-        if (m.hp <= 0) {
-          explode(m.x, m.y, 1);
-          state.meteors.splice(i, 1);
-          state.score += 2;
+  function startTimer() {
+    stopTimer();
+    timerHandle = setInterval(() => {
+      if (mode === "idle") return;
+      timeLeft -= 1;
+      if (timeLeft <= 0) {
+        timeLeft = 0;
+        endRound();
+      }
+      updateHud();
+    }, 1000);
+  }
 
-          // reward shooter
-          const owner = b.owner;
-          if (owner && state.players.has(owner)) {
-            // tiny bonus shot cooldown reduction already handled by boosted
-          }
-        }
-        break;
+  function stopTimer() {
+    if (timerHandle) clearInterval(timerHandle);
+    timerHandle = null;
+  }
+
+  function endRound() {
+    stopTimer();
+    const best = Array.from(users.values()).sort((a, b) => (b.hits - a.hits) || (b.shots - a.shots))[0];
+    if (best && best.hits > 0) {
+      flashWinner(best, `wins the round with ${best.hits} hits!`);
+    } else {
+      flashWinner({ nickname: "No one" }, "No hits this round!");
+    }
+    addFlag({ pfpUrl: best?.profilePictureUrl, line1: "Round ended", line2: best ? `${best.nickname} led with ${best.hits}` : "Try again!" });
+
+    setTimeout(() => {
+      round += 1;
+      resetRound();
+      startTimer();
+      setStatus(mode === "live" && connected ? "LIVE • Round started" : "Practice • Round started");
+      showOverlay(false);
+    }, 1200);
+  }
+
+  function registerUser(user) {
+    if (!user || !user.userId) return null;
+    if (!users.has(user.userId)) {
+      users.set(user.userId, {
+        userId: user.userId,
+        nickname: user.nickname || "Player",
+        profilePictureUrl: user.profilePictureUrl || "",
+        shots: 0,
+        hits: 0,
+        lastShotAt: 0,
+      });
+    } else {
+      const u = users.get(user.userId);
+      u.nickname = user.nickname || u.nickname;
+      u.profilePictureUrl = user.profilePictureUrl || u.profilePictureUrl;
+    }
+    return users.get(user.userId);
+  }
+
+  function tryFireAt(text, user) {
+    const coord = parseCoordinate(text, gridSize, S.commands.fire);
+    if (!coord) return false;
+
+    const u = registerUser(user) || { nickname: "Player" };
+    const now = Date.now();
+    if (u.lastShotAt && now - u.lastShotAt < 1200) return true;
+    u.lastShotAt = now;
+
+    const idx = coord.row * gridSize + coord.col;
+    if (board[idx] === 1 || board[idx] === 2) return true;
+
+    totalShots += 1;
+    u.shots += 1;
+
+    const hit = targets.has(idx);
+    if (hit) {
+      board[idx] = 2;
+      totalHits += 1;
+      u.hits += 1;
+      burstAtCell(coord.col, coord.row, true);
+      addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: `HIT ${S.visuals.hitEmoji} at ${coord.label}` });
+      flashWinner(u, `HIT ${S.visuals.hitEmoji} • ${coord.label}`);
+    } else {
+      board[idx] = 1;
+      burstAtCell(coord.col, coord.row, false);
+      addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: `MISS ${S.visuals.missEmoji} at ${coord.label}` });
+      flashWinner(u, `MISS ${S.visuals.missEmoji} • ${coord.label}`);
+    }
+
+    renderScoreboard();
+
+    if (totalHits >= winGoal) {
+      timeLeft = 0;
+      updateHud();
+      endRound();
+    }
+    return true;
+  }
+
+  function onLike(user, likeCount) {
+    const u = registerUser(user) || { nickname: "Someone", profilePictureUrl: "" };
+    likesBank += clampInt(likeCount || 1, 1, 9999);
+    if (likesBank >= 50) {
+      likesBank = 0;
+      revealHintCell(u);
+    }
+  }
+
+  function revealHintCell(u) {
+    const candidates = [];
+    for (const t of targets) {
+      const r = Math.floor(t / gridSize);
+      const c = t % gridSize;
+      for (const [dr, dc] of [[-1,0],[1,0],[0,-1],[0,1]]) {
+        const rr = r + dr, cc = c + dc;
+        if (rr < 0 || rr >= gridSize || cc < 0 || cc >= gridSize) continue;
+        const idx = rr * gridSize + cc;
+        if (board[idx] === 0) candidates.push(idx);
+      }
+    }
+    if (!candidates.length) return;
+    const idx = candidates[randInt(0, candidates.length - 1)];
+    board[idx] = 3;
+
+    const rr = Math.floor(idx / gridSize);
+    const cc = idx % gridSize;
+    scanRipple(cc, rr);
+    addFlag({ pfpUrl: u?.profilePictureUrl, line1: `${u?.nickname || "Like storm!"}`, line2: `SCAN ${S.visuals.scanEmoji} reveals a warm spot` });
+  }
+
+  function onGift(user, giftName, repeatCount) {
+    const u = registerUser(user) || { nickname: "Someone", profilePictureUrl: "" };
+    const n = clampInt(repeatCount || 1, 1, 10);
+    const strikes = Math.min(3, n);
+    addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: `GIFT: ${giftName} → AIRSTRIKE x${strikes}` });
+    for (let i = 0; i < strikes; i++) setTimeout(() => airstrike(u), 120 * i);
+  }
+
+  function airstrike(u) {
+    const candidates = [];
+    for (let i = 0; i < board.length; i++) if (board[i] === 0) candidates.push(i);
+    if (!candidates.length) return;
+    const idx = candidates[randInt(0, candidates.length - 1)];
+    const r = Math.floor(idx / gridSize);
+    const c = idx % gridSize;
+    tryFireAt(`${toColLabel(c)}${r + 1}`, u);
+  }
+
+  function burstAtCell(col, row, isHit) {
+    const p = cellCenter(col, row);
+    ripples.push({ x: p.x, y: p.y, t: 0, hit: !!isHit });
+
+    for (let i = 0; i < 22; i++) {
+      particles.push({
+        x: p.x,
+        y: p.y,
+        vx: (Math.random() - 0.5) * 6,
+        vy: (Math.random() - 0.7) * 7,
+        life: 40 + Math.random() * 25,
+        hit: !!isHit,
+      });
+    }
+  }
+
+  function scanRipple(col, row) {
+    const p = cellCenter(col, row);
+    ripples.push({ x: p.x, y: p.y, t: 0, hit: null, scan: true });
+  }
+
+  function draw() {
+    requestAnimationFrame(draw);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawBackground();
+    drawGrid();
+    stepEffects();
+    drawRipples();
+    drawParticles();
+    if (mode === "idle") drawIdleHint();
+  }
+
+  function drawBackground() {
+    const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    g.addColorStop(0, "rgba(0,242,234,0.10)");
+    g.addColorStop(1, "rgba(255,0,80,0.08)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "rgba(0,0,0,0.22)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  function gridRect() {
+    const padX = 54;
+    const padY = 150;
+    const size = Math.min(canvas.width - padX * 2, canvas.height - padY * 2);
+    const x = (canvas.width - size) / 2;
+    const y = 200;
+    return { x, y, size };
+  }
+
+  function cellCenter(col, row) {
+    const gr = gridRect();
+    const cs = gr.size / gridSize;
+    return { x: gr.x + (col + 0.5) * cs, y: gr.y + (row + 0.5) * cs, cs };
+  }
+
+  function drawGrid() {
+    const gr = gridRect();
+    const cs = gr.size / gridSize;
+
+    ctx.strokeStyle = "rgba(255,255,255,0.14)";
+    ctx.lineWidth = 2;
+    roundRect(ctx, gr.x - 8, gr.y - 8, gr.size + 16, gr.size + 16, 16);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.font = "900 16px system-ui";
+    for (let c = 0; c < gridSize; c++) {
+      const t = toColLabel(c);
+      const x = gr.x + c * cs + cs / 2;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(t, x, gr.y - 22);
+      ctx.fillText(t, x, gr.y + gr.size + 22);
+    }
+    for (let r = 0; r < gridSize; r++) {
+      const t = String(r + 1);
+      const y = gr.y + r * cs + cs / 2;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(t, gr.x - 22, y);
+      ctx.fillText(t, gr.x + gr.size + 22, y);
+    }
+
+    for (let r = 0; r < gridSize; r++) {
+      for (let c = 0; c < gridSize; c++) {
+        const idx = r * gridSize + c;
+        const x = gr.x + c * cs;
+        const y = gr.y + r * cs;
+
+        ctx.fillStyle = "rgba(0,0,0,0.18)";
+        ctx.fillRect(x + 1, y + 1, cs - 2, cs - 2);
+
+        if (board[idx] === 1) drawEmoji(S.visuals.missEmoji, x + cs / 2, y + cs / 2, 24);
+        else if (board[idx] === 2) drawEmoji(S.visuals.hitEmoji, x + cs / 2, y + cs / 2, 26);
+        else if (board[idx] === 3) drawEmoji(S.visuals.scanEmoji, x + cs / 2, y + cs / 2, 22);
+
+        ctx.strokeStyle = "rgba(255,255,255,0.08)";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(x, y, cs, cs);
       }
     }
   }
 
-  // update explosions
-  for (let i = state.explosions.length - 1; i >= 0; i--) {
-    const e = state.explosions[i];
-    e.t += dt;
-    if (e.t > 0.45) state.explosions.splice(i, 1);
-  }
-}
+  function drawIdleHint() {
+    ctx.fillStyle = "rgba(255,255,255,0.75)";
+    ctx.font = "900 28px system-ui";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("TAP A CELL TO FIRE", canvas.width / 2, 140);
 
-function renderGame(dt) {
-  // meteors
-  for (const m of state.meteors) {
-    ctx.save();
-    ctx.translate(m.x, m.y);
-    ctx.rotate(m.rot);
-    ctx.fillStyle = "rgba(255,255,255,.10)";
-    ctx.strokeStyle = "rgba(255,255,255,.38)";
-    ctx.lineWidth = 2 * DPR;
-    ctx.beginPath();
-    ctx.arc(0, 0, m.r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
-    ctx.restore();
+    ctx.fillStyle = "rgba(255,255,255,0.65)";
+    ctx.font = "700 16px system-ui";
+    ctx.fillText(`Or connect to TikTok LIVE with ${S.commands.join}`, canvas.width / 2, 172);
   }
 
-  // shots
-  for (const b of state.shots) {
-    ctx.fillStyle = b.color;
-    ctx.globalAlpha = 0.9;
-    ctx.beginPath();
-    ctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+  function drawEmoji(emoji, x, y, size) {
+    ctx.font = `900 ${size}px system-ui, Apple Color Emoji, Segoe UI Emoji`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(emoji || "•", x, y);
   }
 
-  // turrets
-  const n = Math.max(1, state.players.size);
-  let idx = 0;
-  for (const p of state.players.values()) {
-    const pos = getTurretPosition(p.slot);
-    const w = (W - 84 * DPR) / n;
-    const baseW = clamp(w, 44 * DPR, 110 * DPR);
-    const baseH = 26 * DPR;
+  function stepEffects() {
+    for (const p of particles) {
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += 0.18;
+      p.life -= 1;
+    }
+    for (let i = particles.length - 1; i >= 0; i--) if (particles[i].life <= 0) particles.splice(i, 1);
 
-    // base
-    ctx.fillStyle = "rgba(0,0,0,.35)";
-    ctx.strokeStyle = "rgba(255,255,255,.12)";
-    ctx.lineWidth = 2 * DPR;
-    ctx.beginPath();
-    ctx.roundRect(pos.x - baseW * 0.45, pos.y + 16 * DPR, baseW * 0.9, baseH, 12 * DPR);
-    ctx.fill();
-    ctx.stroke();
-
-    // turret
-    ctx.fillStyle = p.color;
-    ctx.beginPath();
-    ctx.arc(pos.x, pos.y, 14 * DPR, 0, Math.PI * 2);
-    ctx.fill();
-
-    idx++;
+    for (const r of ripples) r.t += 1;
+    for (let i = ripples.length - 1; i >= 0; i--) if (ripples[i].t > 40) ripples.splice(i, 1);
   }
 
-  // explosions
-  for (const e of state.explosions) {
-    const k = e.t / 0.45;
-    const r = (18 + 90 * k) * DPR * e.s;
-    ctx.globalAlpha = (1 - k) * 0.65;
-    ctx.fillStyle = "white";
-    ctx.beginPath();
-    ctx.arc(e.x, e.y, r, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.globalAlpha = 1;
+  function drawParticles() {
+    for (const p of particles) {
+      const a = clamp01(p.life / 65);
+      ctx.fillStyle = p.hit ? `rgba(255,0,80,${0.45 * a})` : `rgba(0,242,234,${0.40 * a})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+    }
   }
-}
 
-/* =========================================================
-   Start / Stop
-========================================================= */
-function beginGame() {
-  if (!state.connected) {
-    // do not begin gameplay unless connected (no demo mode)
-    setStatus("Offline — connect first.", false);
-    showOverlay();
-    return;
+  function drawRipples() {
+    for (const r of ripples) {
+      const t = r.t / 40;
+      const rad = 6 + t * 64;
+      const a = 1 - t;
+      if (r.scan) ctx.strokeStyle = `rgba(0,242,234,${0.35 * a})`;
+      else if (r.hit) ctx.strokeStyle = `rgba(255,0,80,${0.40 * a})`;
+      else ctx.strokeStyle = `rgba(0,242,234,${0.30 * a})`;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.arc(r.x, r.y, rad, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   }
-  if (state.gameStarted) return;
 
-  resetGameState();
-  state.gameStarted = true;
-  hideOverlay();
-  setStatus("Connected.", true);
+  canvas.addEventListener("pointerdown", (ev) => {
+    if (mode === "idle") {
+      startPractice();
+      return;
+    }
+    if (mode !== "practice") return;
+    const pt = pointerToCanvas(ev);
+    const cell = pointToCell(pt.x, pt.y);
+    if (!cell) return;
+    const fakeUser = { userId: "practice", nickname: "Host", profilePictureUrl: "" };
+    tryFireAt(`${toColLabel(cell.col)}${cell.row + 1}`, fakeUser);
+  });
 
-  // small announcement (only if enabled)
-  flagNotify({ who: "GAME", msg: "Started!", pfp: "", cls: "" });
-}
+  function pointerToCanvas(ev) {
+    const rect = canvas.getBoundingClientRect();
+    const x = ((ev.clientX - rect.left) / rect.width) * canvas.width;
+    const y = ((ev.clientY - rect.top) / rect.height) * canvas.height;
+    return { x, y };
+  }
 
-function stopGame() {
-  state.gameStarted = false;
-  resetGameState();
-  showOverlay();
-}
+  function pointToCell(x, y) {
+    const gr = gridRect();
+    if (x < gr.x || x > gr.x + gr.size || y < gr.y || y > gr.y + gr.size) return null;
+    const cs = gr.size / gridSize;
+    const col = Math.floor((x - gr.x) / cs);
+    const row = Math.floor((y - gr.y) / cs);
+    return { col, row };
+  }
 
-/* =========================================================
-   Command parsing
-========================================================= */
-function normalizeCmd(text) {
-  return String(text || "").trim().toLowerCase().replace(/^[@#!]+/, "");
-}
-function textMatches(text, keyword) {
-  const t = normalizeCmd(text);
-  const k = normalizeCmd(keyword);
-  if (!t || !k) return false;
-  return t === k || t.startsWith(k + " ");
-}
+  startBtn.addEventListener("click", startLiveFromUI);
+  overlayStartBtn.addEventListener("click", startLiveFromUI);
 
-/* =========================================================
-   TikTok event handlers (REAL events only)
-========================================================= */
-let client = null;
+  practiceBtn.addEventListener("click", startPractice);
+  overlayPracticeBtn.addEventListener("click", startPractice);
 
-function onChatMessage(data) {
-  try {
-    const msg = data || {};
-    const ev = normalizeChat(msg);
-    const text = ev.text;
+  function startPractice() {
+    mode = "practice";
+    connected = false;
+    setStatus("Practice • Tap cells to fire");
+    showOverlay(false);
+    round = 1;
+    resetRound();
+    startTimer();
+  }
 
-    if (!text) return;
+  async function startLiveFromUI() {
+    const liveId = String(liveIdInput.value || "").trim();
+    if (!liveId) {
+      setStatus("Enter a LIVE username or room ID first.");
+      return;
+    }
+    await startLive(liveId);
+  }
 
-    // Join by chat command
-    if (textMatches(text, state.cmdJoin || AI.joinKeyword)) {
-      spawnPlayer(ev.userId, ev.nickname, ev.pfp);
+  async function startLive(liveId) {
+    mode = "live";
+    connected = false;
+    setStatus("Connecting…");
+    showOverlay(false);
+
+    const hasClient = typeof window.TikTokClient === "function" || typeof window.TikTokClient === "object";
+    const hasProto = typeof window.proto === "object" && window.proto;
+
+    if (!hasClient || !hasProto) {
+      showBootError("TikTok scripts were not found. Practice mode still works, but LIVE connect requires the platform to inject the TikTok client + proto bundle.");
+      setStatus("Not connected");
       return;
     }
 
-    // Action command
-    if (state.gameStarted) {
-      const actionHit =
-        textMatches(text, state.cmdAction || AI.actionKeyword) ||
-        (AI.allowAnyChatAsAction && state.players.has(ev.userId));
-      if (actionHit) {
-        playerFire(ev.userId, 1);
+    try {
+      client = new window.TikTokClient(liveId, { debug: false });
+      wireClient(client);
+      await client.connect();
+      connected = true;
+      setStatus("LIVE • Connected");
+      round = 1;
+      resetRound();
+      startTimer();
+    } catch (e) {
+      console.error(e);
+      setStatus("Connection failed. Check LIVE ID and try again.");
+    }
+  }
+
+  function wireClient(c) {
+    if (!c || typeof c.on !== "function") return;
+
+    c.on("Connected", () => setStatus("LIVE • Connected"));
+    c.on("Disconnected", () => { connected = false; setStatus("Disconnected"); });
+
+    c.on("Chat", (msg) => {
+      const text = getChatTextFromMessage(msg);
+      const user = getUserFromMessage(msg);
+      if (!text || !user) return;
+
+      if (normalizeChat(text) === normalizeChat(S.commands.join)) {
+        const u = registerUser(user);
+        addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: "joined the hunt" });
+        return;
       }
-    }
-  } catch (e) {
-    console.error("Error in chat handler:", e);
-  }
-}
 
-function onGiftMessage(data) {
-  try {
-    const ev = normalizeGift(data || {});
-    state.gifts += 1;
-    updateHUD();
+      const did = tryFireAt(text, user);
+      if (did) return;
 
-    // Gift triggers a big power event (default: nuke)
-    const name = String(ev.giftName || "").toLowerCase();
-    const isBig = (ev.diamond >= AI.bigGiftDiamondMin) || AI.bigGiftNames.some(x => name.includes(x));
+      addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Chat", line2: text });
+    });
 
-    if (isBig) {
-      nukeAll();
-    } else {
-      // small gift: score bump + short power boost
-      state.score += 1;
-      state.power = clamp(state.power + 0.08, 0, 1);
-      if (state.power >= 1) {
-        state.power = 0;
-        state.powerBoostUntil = nowMs() + AI.powerBoostMs;
-        flagNotify({ who: "POWER", msg: "Boost Activated!", pfp: "", cls: "" });
-      }
-    }
-  } catch (e) {
-    console.error("Error in gift handler:", e);
-  }
-}
+    c.on("Like", (msg) => {
+      const user = getUserFromMessage(msg);
+      const likeCount = msg?.likeCount || msg?.count || 1;
+      onLike(user, likeCount);
+    });
 
-function onLikeMessage(data) {
-  try {
-    const ev = normalizeLike(data || {});
-    state.likes += ev.count;
-    // likes charge meter
-    state.power = clamp(state.power + (ev.count * AI.likePowerGain), 0, 1);
-    if (state.power >= 1) {
-      state.power = 0;
-      state.powerBoostUntil = nowMs() + AI.powerBoostMs;
-      flagNotify({ who: "POWER", msg: "Boost Activated!", pfp: "", cls: "" });
-    }
-  } catch (e) {
-    console.error("Error in like handler:", e);
-  }
-}
+    c.on("Gift", (msg) => {
+      const user = getUserFromMessage(msg);
+      const giftName = msg?.giftName || msg?.gift?.name || "Gift";
+      const repeatCount = msg?.repeatCount || msg?.repeat || 1;
+      onGift(user, giftName, repeatCount);
+    });
 
-function onJoinMessage(data) {
-  try {
-    // Auto-add player on join if enabled
-    if (!AI.useJoinEventToAddPlayer) return;
-    const ev = normalizeJoin(data || {});
-    spawnPlayer(ev.userId, ev.nickname, ev.pfp);
-  } catch (e) {
-    console.error("Error in join handler:", e);
-  }
-}
-
-// Best-effort share support:
-// tiktok-client.js in your current file triggers 'social' reliably,
-// but 'share' is likely NOT firing due to a duplicate switch-case bug.
-// So we listen to 'social' and treat it as a share trigger if allowed.
-function onSocialMessage(data) {
-  try {
-    if (!state.gameStarted) return;
-    if (!state.shareAction && !state.shareJoin) return;
-
-    const user = getUserFromMessage(data || {});
-    if (!user.userId) return;
-
-    // If allowed: share can join OR action, depending toggles
-    if (state.shareJoin) spawnPlayer(user.userId, user.nickname, user.avatar);
-    if (state.shareAction) playerFire(user.userId, 1);
-  } catch (e) {
-    console.error("Error in social handler:", e);
-  }
-}
-
-/* =========================================================
-   TikTok client setup / connect (matches required style)
-========================================================= */
-function setupTikTokClient(liveId) {
-  if (!liveId) {
-    throw new Error("liveId is required");
-  }
-
-  if (client && client.socket) {
-    try {
-      client.socket.close();
-    } catch (e) {
-      console.warn("Error closing previous socket:", e);
-    }
-  }
-
-  if (typeof TikTokClient === "undefined") {
-    throw new Error("TikTokClient is not available. Check tiktok-client.js.");
-  }
-
-  client = new TikTokClient(liveId);
-
-  // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
-  if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
-    try {
-      client.setAccessToken(CHATTOK_CREATOR_TOKEN);
-    } catch (e) {
-      console.warn("Token could not be set:", e);
-    }
-  } else {
-    console.warn("CHATTOK_CREATOR_TOKEN is missing. This is expected outside ChatTokGaming preview/live.");
-    // Do NOT block UI; connect attempt may fail and will be reported.
-  }
-
-  client.on("connected", () => {
-    console.log("Connected to TikTok hub.");
-    state.connected = true;
-    setStatus("Connected to TikTok LIVE.", true);
-
-    // Only start game once we know we're connected
-    if (state.pendingStart && !state.gameStarted) {
-      beginGame();
-    }
-  });
-
-  client.on("disconnected", (reason) => {
-    console.log("Disconnected from TikTok hub:", reason);
-    const msg = reason || "Connection closed";
-    state.connected = false;
-    setStatus("Disconnected: " + msg, false);
-
-    if (!state.gameStarted) {
-      // Connection failed before game start; allow retry
-      state.pendingStart = false;
-    } else {
-      // If game was running, stop it cleanly.
-      stopGame();
-    }
-  });
-
-  client.on("error", (err) => {
-    console.error("TikTok client error:", err);
-    setStatus("Error: " + (err && err.message ? err.message : "Unknown"), false);
-  });
-
-  client.on("chat", onChatMessage);
-  client.on("gift", onGiftMessage);
-  client.on("like", onLikeMessage);
-  client.on("join", onJoinMessage);
-  client.on("social", onSocialMessage);
-
-  // Try connect; if token missing, this may throw. We report cleanly.
-  try {
-    client.connect();
-  } catch (e) {
-    console.error("Connect failed:", e);
-    setStatus("Error: " + (e && e.message ? e.message : "Connect failed"), false);
-    state.pendingStart = false;
-    throw e;
-  }
-}
-
-/* =========================================================
-   AI REGION — AI fills ONLY this area.
-   Keep it compact and structured.
-========================================================= */
-// === AI_REGION_START ===
-const AI = {
-  // Copy should be driven by spec in your prompts; keep clean defaults.
-  title: "Meteor Defense",
-  subtitle: "Viewers join, then use chat/likes/gifts to protect the arena.",
-
-  // Chat commands (host can override in settings panel)
-  joinKeyword: "join",
-  actionKeyword: "fire",
-
-  // If the game concept wants “any chat = action”, AI can enable it
-  allowAnyChatAsAction: false,
-
-  // Share triggers (optional)
-  allowShareForJoinDefault: false,
-  allowShareForActionDefault: false,
-
-  // Use join event to add players
-  useJoinEventToAddPlayer: true,
-
-  // Likes → power meter
-  likePowerGain: 0.0025,     // ~400 likes to fill meter
-  powerBoostMs: 9000,        // boost duration
-
-  // Gifts
-  bigGiftDiamondMin: 100,    // big gift triggers nuke
-  bigGiftNames: ["lion", "universe", "galaxy", "drama", "tiktok"],
-
-  // Visual flair (no demo gameplay)
-  playerColors: ["rgba(0,242,234,.92)", "rgba(255,0,80,.92)", "rgba(255,255,255,.88)", "rgba(255,210,77,.92)"],
-
-  // Notifications: only used if the AI/game calls flagNotify().
-  uiFlagsEnabled: true
-};
-// === AI_REGION_END ===
-
-/* =========================================================
-   Boot
-========================================================= */
-document.addEventListener("DOMContentLoaded", () => {
-  buildUI();
-  ensureSettingsUI();
-
-  // Apply AI settings
-  state.uiFlagsEnabled = !!AI.uiFlagsEnabled;
-
-  setStatus("Offline", false);
-  showOverlay();
-
-  // Start button: connect + (auto) begin game only after 'connected'
-  if (startGameBtn) {
-    startGameBtn.addEventListener("click", () => {
-      try {
-        const liveId = String(liveIdInput && liveIdInput.value ? liveIdInput.value : "").trim().replace(/^@/, "");
-        if (!liveId) {
-          setStatus("Enter a LIVE ID.", false);
-          return;
-        }
-
-        // read settings (from collapsible)
-        state.cmdAction = readSetting("cmdAction", AI.actionKeyword);
-        state.cmdJoin = readSetting("cmdJoin", AI.joinKeyword);
-        state.shareAction = !!readSetting("allowShareForAction", AI.allowShareForActionDefault);
-        state.shareJoin = !!readSetting("allowShareForJoin", AI.allowShareForJoinDefault);
-
-        state.pendingStart = true;
-        setStatus("Connecting…", true);
-
-        setupTikTokClient(liveId);
-      } catch (e) {
-        console.error(e);
-        setStatus("Error: " + (e && e.message ? e.message : "Unknown"), false);
-      }
+    c.on("Member", (msg) => {
+      const user = getUserFromMessage(msg);
+      if (!user) return;
+      addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Viewer", line2: "joined the LIVE" });
     });
   }
 
-  // animation loop (idle visuals allowed, but NO gameplay until beginGame())
-  lastT = performance.now();
-  cancelAnimationFrame(rafId);
-  rafId = requestAnimationFrame(tick);
-});
+  showOverlay(true);
+  setStatus("Ready. Start LIVE or practice.");
+  resetRound();
+  updateHud();
+  draw();
 
-/* =========================================================
-   WORKING TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
-   Here is an example of code to connect, see TikTok messages,
-   and map chat into gameplay. You can adapt this pattern for
-   new games, but keep the structure and error handling style:
-=========================================================
-
-// 7. TikTok message handling
-// ===============================
-
-function handleTeamJoin(text, user) {
-    const maybeTeam = normalizeTeamText(text);
-    if (!maybeTeam) return;
-
-    // Assign or move team.
-    userTeams.set(user.userId, maybeTeam);
-    console.log(`${user.nickname} joined team ${maybeTeam}`);
-}
-
-function handleAnswer(text, user) {
-    if (!gameStarted || gameFinished) return;
-    if (!userTeams.has(user.userId)) return; // must be on a team first
-
-    const answer = normalizeAnswerText(text);
-    if (!answer) return;
-
-    // Only allow one answer per question per user
-    if (answeredUsersThisQuestion.has(user.userId)) return;
-    answeredUsersThisQuestion.set(user.userId, true);
-
-    const team = userTeams.get(user.userId);
-    const q = getCurrentQuestion();
-    if (!q) return;
-
-    // Track participation per round
-    if (roundAnswerCounts[team] !== undefined) {
-        roundAnswerCounts[team] += 1;
+  function normalizeSpec(spec) {
+    const f = {
+      title: "ChatTok Live Game",
+      subtitle: "Live Interactive",
+      oneSentence: "Connect to TikTok LIVE and let chat control the action.",
+      howToPlay: ["Type !join to join.", "Type coordinates like A4 to fire."],
+      defaultSettings: { roundSeconds: 30, winGoal: 20, gridSize: 10 },
+      commands: { join: "!join", fire: "!fire A4" },
+      visuals: { hitEmoji: "💥", missEmoji: "🌊", scanEmoji: "🔎" },
+      archetype: "grid-strike",
+    };
+    if (spec && typeof spec === "object") {
+      Object.assign(f, spec);
+      if (spec.defaultSettings && typeof spec.defaultSettings === "object") f.defaultSettings = { ...f.defaultSettings, ...spec.defaultSettings };
+      if (spec.commands && typeof spec.commands === "object") f.commands = { ...f.commands, ...spec.commands };
+      if (spec.visuals && typeof spec.visuals === "object") f.visuals = { ...f.visuals, ...spec.visuals };
+      if (!Array.isArray(f.howToPlay)) f.howToPlay = f.howToPlay ? [String(f.howToPlay)] : [];
     }
+    f.commands.join = String(f.commands.join || "!join").trim();
+    f.commands.fire = String(f.commands.fire || "!fire A4").trim();
+    f.visuals.hitEmoji = String(f.visuals.hitEmoji || "💥");
+    f.visuals.missEmoji = String(f.visuals.missEmoji || "🌊");
+    f.visuals.scanEmoji = String(f.visuals.scanEmoji || "🔎");
+    return f;
+  }
 
-    if (answer === q.correct) {
-        teamScores[team]++;
-        teamRoundScores[team]++;
-        updateScoreDisplay();
-        flashCorrectAnswer(user.nickname, team, answer);
-    }
+  function parseCoordinate(text, size, firePatternHint) {
+    const t0 = String(text || "").trim();
+    if (!t0) return null;
 
-    updateRoundDuelBar();
-}
+    const hint = String(firePatternHint || "!fire A4").split(/\s+/)[0].trim();
+    let t = t0;
+    if (hint && normalizeChat(t).startsWith(normalizeChat(hint))) t = t.slice(hint.length).trim();
 
-function onChatMessage(data) {
-    try {
-        const msg = data || {};
-        const text = getChatTextFromMessage(msg);
-        const user = getUserFromMessage(msg);
+    const cleaned = t.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    const m = cleaned.match(/^([A-Z])([0-9]{1,2})$/);
+    if (!m) return null;
 
-        if (!text) return;
+    const col = m[1].charCodeAt(0) - 65;
+    const row = Number(m[2]) - 1;
+    if (col < 0 || col >= size || row < 0 || row >= size) return null;
 
-        // 1) Team selection ("red" / "blue"; any case)
-        handleTeamJoin(text, user);
+    return { col, row, label: `${toColLabel(col)}${row + 1}` };
+  }
 
-        // 2) Answer selection ("A"/"B"/"C"/"D"; any case)
-        handleAnswer(text, user);
-    } catch (e) {
-        console.error("Error in chat handler:", e);
-    }
-}
+  function toColLabel(col) { return String.fromCharCode(65 + col); }
 
-function onGiftMessage(data) {
-    try {
-        // You can optionally use gifts to boost scores, etc.
-        console.log("Gift message:", data);
-    } catch (e) {
-        console.error("Error in gift handler:", e);
-    }
-}
+  function formatTime(sec) {
+    const s = clampInt(sec, 0, 9999);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return m > 0 ? `${m}:${String(r).padStart(2, "0")}` : String(r);
+  }
 
-// ===============================
-// 8. TikTok client setup / connect
-// ===============================
+  function clampInt(n, a, b) {
+    const x = Number(n);
+    if (!Number.isFinite(x)) return a;
+    return Math.max(a, Math.min(b, Math.floor(x)));
+  }
+  function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+  function randInt(a, b) { return Math.floor(a + Math.random() * (b - a + 1)); }
 
-function setupTikTokClient(liveId) {
-    if (!liveId) {
-        throw new Error("liveId is required");
-    }
+  function roundRect(ctx, x, y, w, h, r) {
+    const rr = Math.max(0, Math.min(r, Math.min(w, h) / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + rr, y);
+    ctx.arcTo(x + w, y, x + w, y + h, rr);
+    ctx.arcTo(x + w, y + h, x, y + h, rr);
+    ctx.arcTo(x, y + h, x, y, rr);
+    ctx.arcTo(x, y, x + w, y, rr);
+    ctx.closePath();
+  }
 
-    if (client && client.socket) {
-        try {
-            client.socket.close();
-        } catch (e) {
-            console.warn("Error closing previous socket:", e);
-        }
-    }
+  function escapeHtml(s) {
+    return String(s || "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
+  }
+  function escapeAttr(s) { return escapeHtml(s).replaceAll("`", "&#96;"); }
 
-    if (typeof TikTokClient === "undefined") {
-        throw new Error("TikTokClient is not available. Check tiktok-client.js.");
-    }
+  function normalizeChat(t) { return String(t || "").trim().toLowerCase(); }
 
-    client = new TikTokClient(liveId);
+  // =========================================================
+  // 8. TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
+  //
+  // Here is an example of code to connect to the server, see TikTok messages,
+  // and map chat into gameplay. You can adapt this pattern for new games,
+  // but keep the structure and error handling style:
+  //
+  // // 7. TikTok message handling
+  // // ===============================
+  //
+  // function handleTeamJoin(text, user) {
+  //     const maybeTeam = normalizeTeamText(text);
+  //     if (!maybeTeam) return;
+  //
+  //     // Assign or move team.
+  //     userTeams.set(user.userId, maybeTeam);
+  //     console.log(`${user.nickname} joined team ${maybeTeam}`);
+  // }
+  //
+  // function handleAnswer(text, user) {
+  //     if (!gameStarted || gameFinished) return;
+  //     if (!userTeams.has(user.userId)) return; // must be on a team first
+  //
+  //     const answer = normalizeAnswerText(text);
+  //     if (!answer) return;
+  //
+  //     // Only allow one answer per question per user
+  //     if (answeredUsersThisQuestion.has(user.userId)) return;
+  //     answeredUsersThisQuestion.set(user.userId, true);
+  //
+  //     const team = userTeams.get(user.userId
+  //
+  // =========================================================
 
-    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
-    if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
-        client.setAccessToken(CHATTOK_CREATOR_TOKEN);
-    }
+  function getChatTextFromMessage(msg) {
+    return (msg?.comment || msg?.text || msg?.message || msg?.content || "").toString();
+  }
 
-    client.on("connected", () => {
-        console.log("Connected to TikTok hub.");
-        if (statusText) statusText.textContent = "Connected to TikTok LIVE.";
-        if (statusTextInGame) statusTextInGame.textContent = "Connected.";
+  function getUserFromMessage(msg) {
+    const userId = (msg?.userId || msg?.user?.userId || msg?.user?.id || msg?.uniqueId || msg?.id || "").toString();
+    if (!userId) return null;
 
-        // Only start game once we know we're connected
-        if (pendingStart && !gameStarted) {
-            beginGame();
-        }
-    });
+    const nickname = (msg?.nickname || msg?.user?.nickname || msg?.user?.uniqueId || msg?.uniqueId || "Viewer").toString();
+    const pfp =
+      (msg?.profilePictureUrl ||
+        msg?.user?.profilePictureUrl ||
+        msg?.user?.avatarUrl ||
+        msg?.avatarUrl ||
+        "").toString();
 
-    client.on("disconnected", (reason) => {
-        console.log("Disconnected from TikTok hub:", reason);
-        const msg = reason || "Connection closed";
-        if (statusText) statusText.textContent = "Disconnected: " + msg;
-        if (statusTextInGame) statusTextInGame.textContent = "Disconnected: " + msg;
-
-        if (!gameStarted) {
-            // Connection failed before game start; allow retry
-            pendingStart = false;
-        }
-    });
-
-    client.on("error", (err) => {
-        console.error("TikTok client error:", err);
-        if (statusText) statusText.textContent =
-            "Error: " + (err && err.message ? err.message : "Unknown");
-    });
-
-    client.on("chat", onChatMessage);
-    client.on("gift", onGiftMessage);
-    client.on("like", (data) => {
-        // Optionally use likes later
-        // console.log("Like message:", data);
-    });
-
-    client.connect();
-}
-
-========================================================= */
+    return { userId, nickname, profilePictureUrl: pfp };
+  }
+})();

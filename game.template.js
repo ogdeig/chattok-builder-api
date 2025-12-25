@@ -9,30 +9,7 @@
 ========================================================= */
 
 /* Injected spec (do not edit by hand in generated games) */
-const SPEC = {
-  "title": "Asteroid Assault",
-  "subtitle": "Defend Against the Cosmic Onslaught!",
-  "oneSentence": "Join the fight against asteroid swarms in this interactive chat game on TikTok LIVE.",
-  "howToPlay": [
-    "Type !join to enter the game.",
-    "Use !fire command with a grid position (e.g., !fire A4) to shoot down asteroids."
-  ],
-  "defaultSettings": {
-    "roundSeconds": 30,
-    "winGoal": 20,
-    "gridSize": 10
-  },
-  "commands": {
-    "join": "!join",
-    "fire": "!fire A4"
-  },
-  "visuals": {
-    "hitEmoji": "💥",
-    "missEmoji": "🌊",
-    "scanEmoji": "🔎"
-  },
-  "archetype": "grid-strike"
-}; /*__SPEC_END__*/
+const SPEC = __SPEC_JSON__; /*__SPEC_END__*/
 
 (() => {
   "use strict";
@@ -68,7 +45,8 @@ const SPEC = {
 
   const required = [
     setupOverlay, liveIdInput, startBtn, practiceBtn, overlayStartBtn, overlayPracticeBtn,
-    statusText, statusTextInGame, canvas, scoreboardEl, flagsEl, flashLayer
+    statusText, statusTextInGame, canvas, scoreboardEl, flagsEl, flashLayer,
+    hudRound, hudTime, hudShots, hudHits
   ];
   if (required.some((x) => !x)) {
     console.error("Missing required HTML elements. Ensure index.html matches template.");
@@ -221,7 +199,10 @@ const SPEC = {
       u.lastShotAt = 0;
     }
 
-    placeTargetsRandom(12);
+    // Scale targets with grid size so different prompts/settings still feel good
+    const targetCount = clampInt(Math.floor(gridSize * gridSize * 0.12), 8, Math.floor(gridSize * gridSize * 0.35));
+    placeTargetsRandom(targetCount);
+
     timeLeft = S.defaultSettings.roundSeconds;
 
     particles.length = 0;
@@ -259,7 +240,11 @@ const SPEC = {
     timerHandle = null;
   }
 
+  let roundEnding = false;
   function endRound() {
+    if (roundEnding) return;
+    roundEnding = true;
+
     stopTimer();
 
     const best = Array.from(users.values())
@@ -279,6 +264,7 @@ const SPEC = {
 
     setTimeout(() => {
       round += 1;
+      roundEnding = false;
       resetRound();
       startTimer();
       setStatus(mode === "live" && connected ? "LIVE • Round started" : "Practice • Round started");
@@ -613,7 +599,6 @@ const SPEC = {
     mode = "practice";
     connected = false;
 
-    // If a live client existed, try to close it
     try {
       if (client && client.socket) client.socket.close();
     } catch {}
@@ -644,7 +629,6 @@ const SPEC = {
     setStatus("Connecting…");
     showOverlay(false);
 
-    // IMPORTANT: Don’t block if proto is missing; just warn.
     const hasClient = typeof window.TikTokClient !== "undefined";
     const hasProto = typeof window.proto !== "undefined" && window.proto;
 
@@ -658,7 +642,6 @@ const SPEC = {
     }
 
     if (!hasProto) {
-      // Soft warning only (some builds bundle internally)
       showBootError(
         "Proto bundle was not detected in this preview. LIVE may not work locally. On ChatTok Gaming it is injected automatically."
       );
@@ -666,7 +649,6 @@ const SPEC = {
 
     try {
       setupTikTokClient(liveId);
-      // beginLiveGame() runs on "connected" event.
     } catch (e) {
       console.error(e);
       pendingStart = false;
@@ -731,20 +713,17 @@ const SPEC = {
       const user = getUserFromMessage(msg);
       if (!text) return;
 
-      // Join
       if (user && normalizeChat(text) === normalizeChat(S.commands.join)) {
         const u = registerUser(user);
         addFlag({ pfpUrl: u.profilePictureUrl, line1: `${u.nickname}`, line2: "joined the hunt" });
         return;
       }
 
-      // Fire command (or coordinate typed in any reasonable format)
       if (user) {
         const did = tryFireAt(text, user);
         if (did) return;
       }
 
-      // Otherwise, show chat flag
       if (user) addFlag({ pfpUrl: user.profilePictureUrl, line1: user.nickname || "Chat", line2: text });
     } catch (e) {
       console.error("Error in chat handler:", e);
@@ -779,7 +758,6 @@ const SPEC = {
   function setupTikTokClient(liveId) {
     if (!liveId) throw new Error("liveId is required");
 
-    // close previous socket safely
     if (client && client.socket) {
       try { client.socket.close(); } catch (e) { console.warn("Error closing previous socket:", e); }
     }
@@ -790,12 +768,10 @@ const SPEC = {
 
     client = new TikTokClient(liveId);
 
-    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
     if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
       try { client.setAccessToken(CHATTOK_CREATOR_TOKEN); } catch {}
     }
 
-    // Event names vary by build; register both lower + upper where applicable
     const on = (evt, fn) => {
       try { client.on(evt, fn); } catch {}
     };
@@ -817,7 +793,7 @@ const SPEC = {
       connected = false;
       const msg = reason || "Connection closed";
       setStatus("Disconnected: " + msg);
-      if (!connected) pendingStart = false;
+      pendingStart = false;
     });
 
     on("Disconnected", (reason) => {
@@ -825,7 +801,7 @@ const SPEC = {
       connected = false;
       const msg = reason || "Connection closed";
       setStatus("Disconnected: " + msg);
-      if (!connected) pendingStart = false;
+      pendingStart = false;
     });
 
     on("error", (err) => {
@@ -842,7 +818,6 @@ const SPEC = {
       pendingStart = false;
     });
 
-    // message streams
     on("chat", onChatMessage);
     on("Chat", onChatMessage);
 
@@ -910,12 +885,10 @@ const SPEC = {
     const t0 = String(text || "").trim();
     if (!t0) return null;
 
-    // allow "!fire A4" style; remove the "!fire" part if present
     const hint = String(firePatternHint || "!fire A4").split(/\s+/)[0].trim();
     let t = t0;
     if (hint && normalizeChat(t).startsWith(normalizeChat(hint))) t = t.slice(hint.length).trim();
 
-    // accept "A4", "a-4", "A 4", etc.
     const cleaned = t.toUpperCase().replace(/[^A-Z0-9]/g, "");
     const m = cleaned.match(/^([A-Z])([0-9]{1,2})$/);
     if (!m) return null;

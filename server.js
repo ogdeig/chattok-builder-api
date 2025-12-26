@@ -3,7 +3,7 @@ import cors from "cors";
 import crypto from "crypto";
 import OpenAI from "openai";
 
-const app = express();
+const app = express;
 
 /* ===============================
    Config helpers
@@ -14,11 +14,11 @@ function getTimeoutMs() {
   return Number.isFinite(v) && v >= 5000 ? v : 60000;
 }
 function getTemperature() {
-  const v = Number(process.env.OPENAI_TEMPERATURE || 0.4);
-  if (!Number.isFinite(v)) return 0.4;
+  const v = Number(process.env.OPENAI_TEMPERATURE || 0.35);
+  if (!Number.isFinite(v)) return 0.35;
   return Math.max(0, Math.min(1.2, v));
 }
-function safeStr(x, max = 20000) {
+function safeStr(x, max = 200000) {
   const s = String(x ?? "").trim();
   return s.length > max ? s.slice(0, max) : s;
 }
@@ -47,22 +47,21 @@ function normalizeTheme(theme = {}) {
    Middleware
    =============================== */
 
-app.use(express.json({ limit: "2mb" }));
+// allow screenshots (base64) + larger specs
+app.use(express.json({ limit: "10mb" }));
 
-// CORS: allow GitHub Pages + your future domains.
-// Add/remove as needed.
 const allowedOrigins = new Set([
   "https://ogdeig.github.io",
   "http://localhost:5500",
   "http://127.0.0.1:5500",
   "https://chattokapps.com",
-  "https://www.chattokapps.com"
+  "https://www.chattokapps.com",
 ]);
 
 app.use(
   cors({
     origin: (origin, cb) => {
-      if (!origin) return cb(null, true); // allow non-browser requests
+      if (!origin) return cb(null, true);
       if (allowedOrigins.has(origin)) return cb(null, true);
       return cb(new Error("CORS blocked for origin: " + origin));
     },
@@ -83,29 +82,22 @@ function noStore(_req, res, next) {
 
 function listRoutes(appInstance) {
   const out = [];
-
-  const walkStack = (stack, prefix = "") => {
+  const walkStack = (stack) => {
     for (const layer of stack) {
-      // direct route
       if (layer.route?.path) {
         const methods = Object.keys(layer.route.methods || {})
           .filter(Boolean)
           .map((m) => m.toUpperCase());
-        out.push({ path: prefix + layer.route.path, methods });
+        out.push({ path: layer.route.path, methods });
         continue;
       }
-
-      // router mounted with app.use("/prefix", router)
       if (layer.name === "router" && layer.handle?.stack) {
-        // Express stores mount path in regexp; best-effort:
-        // if layer.regexp exists, we keep prefix as-is; you still see internal route paths.
-        walkStack(layer.handle.stack, prefix);
+        walkStack(layer.handle.stack);
       }
     }
   };
+  if (appInstance?._router?.stack) walkStack(appInstance._router.stack);
 
-  if (appInstance?._router?.stack) walkStack(appInstance._router.stack, "");
-  // de-dupe
   const seen = new Set();
   return out.filter((r) => {
     const key = `${r.methods.join(",")} ${r.path}`;
@@ -116,7 +108,7 @@ function listRoutes(appInstance) {
 }
 
 /* ===============================
-   OpenAI helpers (cheap + robust)
+   OpenAI helpers
    =============================== */
 
 function getOpenAIClient() {
@@ -129,10 +121,8 @@ function extractFirstJsonObject(text) {
   const s = String(text || "").trim();
   if (!s) return null;
 
-  // Try direct parse
   try { return JSON.parse(s); } catch {}
 
-  // Try to find first {...} block
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
   if (start >= 0 && end > start) {
@@ -151,7 +141,6 @@ async function openaiJson({ model, system, user, timeoutMs, temperature }) {
   const t = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    // Use chat.completions for broad compatibility
     const resp = await client.chat.completions.create(
       {
         model,
@@ -177,142 +166,432 @@ async function openaiJson({ model, system, user, timeoutMs, temperature }) {
 }
 
 /* ===============================
-   Builders (spec + files + edit)
+   Fallback spec
    =============================== */
 
-function fallbackSpecFromIdea(prompt, templateId, theme) {
+function fallbackSpecFromIdea(prompt, theme) {
   return {
     title: "New TikTok Live Game",
-    templateId,
-    summary: prompt.slice(0, 240),
+    subtitle: "Built with ChatTokApps",
+    oneLiner: "A TikTok LIVE interactive game.",
+    theme,
     ui: {
       orientation: "9:16",
-      theme,
-      screens: ["settings", "game"]
+      screens: ["settings", "game"],
+      notes: "Settings screen connects and gates Start; Game screen replaces settings."
     },
     settings: [
-      { id: "roundSeconds", type: "number", label: "Round Length (seconds)", min: 15, max: 300, default: 60 },
-      { id: "difficulty", type: "select", label: "Difficulty", options: ["Easy", "Normal", "Hard"], default: "Normal" }
+      { id: "offlineToggle", type: "checkbox", label: "Offline/Test Mode", default: false },
+      { id: "sfxToggle", type: "checkbox", label: "Sound FX", default: true },
+      { id: "volume", type: "range", label: "Volume", min: 0, max: 100, default: 60 }
     ],
     chat: {
-      joinCommand: "!join",
-      commands: [
-        { command: "!join", effect: "Join the session" },
-        { command: "!spawn", effect: "Trigger a game action (varies by game)" }
+      mapping: [
+        { event: "chat", rule: "data.content triggers gameplay actions based on prompt" },
+        { event: "gift", rule: "data.gift.* scales stronger effects" }
       ]
     },
-    scoring: {
-      enabled: true,
-      description: "Points awarded for participation and correct actions."
+    host: {
+      controls: ["Start", "Pause", "Reset/Quit", "Keyboard/mouse inputs depending on game"]
     },
-    sfx: {
-      enabled: true,
-      cues: ["join", "action", "win", "lose"]
-    }
+    scoring: { enabled: true, notes: "Score impacts leaderboard display." },
+    rounds: { enabled: true, notes: "Round timer or win condition ends round." },
+    sfx: { enabled: true, cues: ["join", "action", "hit", "win"] },
+    promptSummary: safeStr(prompt, 300),
   };
 }
 
-function validateFiles(files) {
-  return (
-    files &&
-    typeof files === "object" &&
-    typeof files["index.html"] === "string" &&
-    typeof files["style.css"] === "string" &&
-    typeof files["game.js"] === "string"
-  );
+/* ===============================
+   Enforce TikTok dependency script order in HTML
+   =============================== */
+
+const REQUIRED_SCRIPT_BLOCK = `
+  <!-- REQUIRED DEP ORDER (fixes proto is not defined / TikTokClient not available) -->
+  <script src="https://cdn.jsdelivr.net/npm/google-protobuf@3.21.2/google-protobuf.js"></script>
+  <script src="generic.js"></script>
+  <script src="unknownobjects.js"></script>
+  <script src="data_linkmic_messages.js"></script>
+  <script src="tiktok-client.js"></script>
+
+  <!-- Your game -->
+  <script src="game.js"></script>
+`.trim();
+
+function ensureTikTokScriptOrder(html) {
+  let out = String(html || "");
+
+  // remove any existing references to these scripts (to avoid duplicates / wrong order)
+  out = out.replace(/<script[^>]+src=["'][^"']*(google-protobuf|google-protobuf\.js)[^"']*["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']generic\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']unknownobjects\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']data_linkmic_messages\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']tiktok-client\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+  out = out.replace(/<script[^>]+src=["']game\.js["'][^>]*>\s*<\/script>\s*/gi, "");
+
+  // insert required block before </body> if possible, else append
+  if (out.includes("</body>")) {
+    out = out.replace("</body>", `\n${REQUIRED_SCRIPT_BLOCK}\n</body>`);
+  } else {
+    out += `\n${REQUIRED_SCRIPT_BLOCK}\n`;
+  }
+
+  return out;
 }
 
+function ensureCssAndTitle(html) {
+  let out = String(html || "");
+  if (!/href=["']style\.css["']/.test(out)) {
+    out = out.replace(/<\/head>/i, `  <link rel="stylesheet" href="style.css" />\n</head>`);
+  }
+  if (!/<title>/.test(out)) {
+    out = out.replace(/<\/head>/i, `  <title>ChatTok Game</title>\n</head>`);
+  }
+  return out;
+}
+
+/* ===============================
+   System rules
+   =============================== */
+
 function buildSystemRules(builderRules = "") {
-  // Your mandatory TikTok connection example will be sent from the builder as builderRules.
-  // We enforce JSON-only output at the system level too.
   return `
 You are a senior HTML/CSS/JS game developer.
 Return ONLY valid JSON. No markdown. No backticks.
+
+Non-negotiable:
+- 9:16 portrait
+- Two screens: Settings (connect + gated Start) and Game screen
+- Use TikTokClient from tiktok-client.js (SignalR-compatible). Do NOT replace it.
+- Wrap handlers in try/catch. Never crash on missing fields.
+- Chat text at data.content, username at data.user.displayid or data.user.nickname, pfp at data.user.avatarthumb.urllistList[0]
+- Gifts at data.gift.name/id/diamondcount and data.combocount/repeatcount
+
+Critical dependency order in index.html (must be present exactly before game.js):
+<script src="https://cdn.jsdelivr.net/npm/google-protobuf@3.21.2/google-protobuf.js"></script>
+<script src="generic.js"></script>
+<script src="unknownobjects.js"></script>
+<script src="data_linkmic_messages.js"></script>
+<script src="tiktok-client.js"></script>
+<script src="game.js"></script>
 
 ${builderRules ? "BUILDER RULES:\n" + builderRules : ""}
 `.trim();
 }
 
-async function generateSpecWithAI({ prompt, templateId, theme, builderRules }) {
+/* ===============================
+   AI generators
+   =============================== */
+
+async function generateSpecWithAI({ prompt, theme, builderRules }) {
   const model = String(process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini").trim();
   const timeoutMs = getTimeoutMs();
   const temperature = getTemperature();
 
   const system = buildSystemRules(builderRules);
+
   const user = `
 Create a detailed game SPEC as JSON.
 
-Constraints:
-- Must be a TikTok LIVE interactive game
-- Must be 9:16 portrait
-- Must include: title, one-liner, howToPlay for host and chat, settings list, chat commands mapping, scoring, rounds, sound cues, UI layout notes.
-- Must reference theme colors passed in.
-- Output JSON object keys: title, subtitle, oneLiner, templateId, theme, howToPlay, settings, chat, host, scoring, rounds, sfx, ui
+Output keys:
+title, subtitle, oneLiner, theme, howToPlay, settings, chat, host, scoring, rounds, sfx, ui
+
+Requirements:
+- Must describe Settings screen + Game screen layout
+- Must include "Start is gated until connected" and optional Offline/Test mode
 
 Inputs:
-templateId: ${templateId}
 theme: ${JSON.stringify(theme)}
 prompt: ${JSON.stringify(prompt)}
 `.trim();
 
-  const r = await openaiJson({ model, system, user, timeoutMs, temperature });
-  if (!r.ok) return { ok: false, error: r.error, raw: r.raw };
-
-  // Light normalize
-  const spec = r.json;
-  spec.templateId = spec.templateId || templateId;
-  spec.theme = theme;
-
-  return { ok: true, spec };
+  return await openaiJson({ model, system, user, timeoutMs, temperature });
 }
 
-async function generateFilesWithAI({ prompt, templateId, theme, spec, builderRules }) {
+async function generateSingleFileWithAI({ target, prompt, theme, spec, contextFiles, builderRules }) {
   const model = String(process.env.OPENAI_MODEL_BUILD || "gpt-4o-mini").trim();
   const timeoutMs = getTimeoutMs();
   const temperature = getTemperature();
 
   const system = buildSystemRules(builderRules);
-  const user = `
-Generate a COMPLETE professional game as JSON with exactly 3 keys:
-- "index.html"
-- "style.css"
-- "game.js"
 
-Rules:
-- No markdown, only JSON.
-- index.html must reference style.css and game.js.
-- The game must implement: settings screen → connect TikTok Live ID → start → game screen.
-- Must be 9:16 responsive and polished.
-- Must use the TikTokClient connect pattern provided in the builder rules.
-- Must NOT include external CDN Tailwind. Use hand-written CSS.
-- Must include SFX hooks with WebAudio or <audio> (no copyrighted assets; use simple synth/beeps if needed).
-- Must include clear on-screen directions overlay with transparent background.
-- Must cache profile pics in JS map when used.
+  const ctxHtml = safeStr(contextFiles?.["index.html"] || "", 180000);
+  const ctxCss = safeStr(contextFiles?.["style.css"] || "", 180000);
 
-Inputs:
-templateId: ${templateId}
+  let user = "";
+
+  if (target === "index.html") {
+    user = `
+Generate ONLY index.html as JSON with exactly one key: "index.html".
+
+Hard requirements:
+- Reference <link rel="stylesheet" href="style.css">
+- Include Settings screen and Game screen containers with clear IDs used by game.js
+- Settings screen: Live ID input, Connect button, Offline/Test toggle (optional), settings controls, Start button (disabled until connected or offline mode)
+- Game screen: 9:16 stage with canvas or main play area + transparent directions overlay
+- MUST include required script tags in the exact dependency order before game.js.
+
 theme: ${JSON.stringify(theme)}
 spec: ${JSON.stringify(spec)}
 prompt: ${JSON.stringify(prompt)}
 `.trim();
+  } else if (target === "style.css") {
+    user = `
+Generate ONLY style.css as JSON with exactly one key: "style.css".
 
-  const r = await openaiJson({ model, system, user, timeoutMs, temperature });
-  if (!r.ok) return { ok: false, error: r.error, raw: r.raw };
+Hard requirements:
+- No Tailwind CDN, no external libs
+- Style must look professional and modern for TikTok LIVE (mobile-first)
+- Must support 9:16 portrait stage
+- Must style Settings screen and Game screen per HTML structure below
+- Use theme colors (primary/secondary/bg/surface/text)
 
-  const files = r.json;
-  if (!validateFiles(files)) {
-    return { ok: false, error: "AI returned JSON but missing required files keys", raw: r.raw };
+index.html (structure you must match):
+${JSON.stringify(ctxHtml)}
+
+theme: ${JSON.stringify(theme)}
+spec: ${JSON.stringify(spec)}
+prompt: ${JSON.stringify(prompt)}
+`.trim();
+  } else if (target === "game.js") {
+    user = `
+Generate ONLY game.js as JSON with exactly one key: "game.js".
+
+Hard requirements:
+- Create TikTokClient ONLY after clicking Connect
+- Close any previous socket if exists
+- If CHATTOK_CREATOR_TOKEN exists, call client.setAccessToken(CHATTOK_CREATOR_TOKEN)
+- Wire events: chat, gift, like, join, social, roomUserSeq, control
+- Handlers must read MessagesClean fields (chat text at data.content etc) with try/catch guards
+- Start must be gated: Start button enabled only when connected OR offline mode enabled
+- Switch Settings screen -> Game screen on Start
+- Provide gameplay skeleton based on spec and prompt (canvas loop, input handlers, SFX beeps)
+- Must not crash if TikTok fields missing
+
+index.html (IDs/structure you must match):
+${JSON.stringify(ctxHtml)}
+
+style.css (for visual intent, optional reference):
+${JSON.stringify(ctxCss)}
+
+theme: ${JSON.stringify(theme)}
+spec: ${JSON.stringify(spec)}
+prompt: ${JSON.stringify(prompt)}
+`.trim();
+  } else {
+    return { ok: false, error: "Unsupported target" };
   }
-  return { ok: true, files };
+
+  return await openaiJson({ model, system, user, timeoutMs, temperature });
 }
 
-async function editFilesWithAI({ editPrompt, theme, files, builderRules }) {
-  const model = String(process.env.OPENAI_MODEL_BUILD || "gpt-4o-mini").trim();
-  const timeoutMs = getTimeoutMs();
-  const temperature = getTemperature();
+/* ===============================
+   Routes
+   =============================== */
 
-  const system = buildSystemRules(builderRules);
-  const user = `
+app.get("/api/ping", noStore, (_req, res) => {
+  res.json({ ok: true, name: "chattok-builder-api", time: new Date().toISOString() });
+});
+
+app.get("/api/routes", noStore, (_req, res) => {
+  res.json({ ok: true, routes: listRoutes(app) });
+});
+
+/* ===============================
+   /api/plan  (Spec)
+   =============================== */
+
+app.post("/api/plan", noStore, async (req, res) => {
+  const requestId = safeStr(req.body?.requestId || crypto.randomUUID(), 120);
+  try {
+    const prompt = safeStr(req.body?.prompt || "", 40000);
+    assert(prompt, "Missing prompt");
+
+    const theme = normalizeTheme(req.body?.theme || {});
+    const builderRules = safeStr(req.body?.builderRules || "", 80000);
+
+    const client = getOpenAIClient();
+    let spec = null;
+    let usedFallback = false;
+
+    if (client) {
+      const r = await generateSpecWithAI({ prompt, theme, builderRules });
+      if (r.ok) spec = r.json;
+      else {
+        usedFallback = true;
+        spec = fallbackSpecFromIdea(prompt, theme);
+      }
+    } else {
+      usedFallback = true;
+      spec = fallbackSpecFromIdea(prompt, theme);
+    }
+
+    res.json({
+      ok: true,
+      requestId,
+      echoPrompt: prompt,
+      spec,
+      usedFallback,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      ok: false,
+      requestId,
+      error: err.message || "Plan failed",
+    });
+  }
+});
+
+/* ===============================
+   /api/build  (one file at a time via target)
+   =============================== */
+
+app.post("/api/build", noStore, async (req, res) => {
+  const requestId = safeStr(req.body?.requestId || crypto.randomUUID(), 120);
+  try {
+    const prompt = safeStr(req.body?.prompt || "", 40000);
+    assert(prompt, "Missing prompt");
+
+    const theme = normalizeTheme(req.body?.theme || {});
+    const builderRules = safeStr(req.body?.builderRules || "", 80000);
+
+    const target = safeStr(req.body?.target || "", 50);
+    assert(target, "Missing target (index.html | style.css | game.js)");
+    assert(["index.html", "style.css", "game.js"].includes(target), "Invalid target");
+
+    const contextFiles = req.body?.contextFiles && typeof req.body.contextFiles === "object" ? req.body.contextFiles : {};
+
+    // Spec must be provided (cheap). If not, fallback or build it.
+    let spec = req.body?.spec && typeof req.body.spec === "object" ? req.body.spec : null;
+    if (!spec) spec = fallbackSpecFromIdea(prompt, theme);
+
+    const client = getOpenAIClient();
+    if (!client) {
+      // No OpenAI: return minimal, but still valid
+      if (target === "index.html") {
+        let html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>${safeStr(spec.title || "ChatTok Game", 120)}</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <section id="settingsScreen" class="screen">
+      <h1>${safeStr(spec.title || "ChatTok Game", 120)}</h1>
+      <label>TikTok Live ID <input id="liveIdInput" /></label>
+      <button id="btnConnect">Connect</button>
+      <label><input id="offlineToggle" type="checkbox" /> Offline/Test</label>
+      <button id="btnStart" disabled>Start</button>
+    </section>
+
+    <section id="gameScreen" class="screen hidden">
+      <canvas id="gameCanvas" width="720" height="1280"></canvas>
+      <button id="btnQuit">Quit</button>
+    </section>
+  </div>
+${REQUIRED_SCRIPT_BLOCK}
+</body>
+</html>`;
+        html = ensureCssAndTitle(ensureTikTokScriptOrder(html));
+        return res.json({ ok: true, requestId, echoPrompt: prompt, fileName: "index.html", content: html });
+      }
+      if (target === "style.css") {
+        const css = `:root{--p:${theme.primary};--s:${theme.secondary};--bg:${theme.bg};--text:${theme.text};}
+body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;}
+.hidden{display:none !important;}
+canvas{width:100%;height:auto;display:block;}`;
+        return res.json({ ok: true, requestId, echoPrompt: prompt, fileName: "style.css", content: css });
+      }
+      if (target === "game.js") {
+        const js = `// OpenAI unavailable - minimal skeleton\nconsole.log("game.js loaded");`;
+        return res.json({ ok: true, requestId, echoPrompt: prompt, fileName: "game.js", content: js });
+      }
+    }
+
+    const r = await generateSingleFileWithAI({ target, prompt, theme, spec, contextFiles, builderRules });
+    if (!r.ok) {
+      return res.status(500).json({
+        ok: false,
+        requestId,
+        echoPrompt: prompt,
+        error: r.error || "Build failed",
+        raw: r.raw || null,
+      });
+    }
+
+    let content = r.json?.[target];
+    if (typeof content !== "string") {
+      return res.status(500).json({
+        ok: false,
+        requestId,
+        echoPrompt: prompt,
+        error: "AI returned JSON but missing target key",
+        raw: r.raw || null,
+      });
+    }
+
+    if (target === "index.html") {
+      content = ensureCssAndTitle(ensureTikTokScriptOrder(content));
+    }
+
+    return res.json({
+      ok: true,
+      requestId,
+      echoPrompt: prompt,
+      spec,
+      fileName: target,
+      content,
+    });
+  } catch (err) {
+    res.status(err.status || 500).json({
+      ok: false,
+      requestId,
+      error: err.message || "Build failed",
+    });
+  }
+});
+
+/* ===============================
+   /api/edit  (edits all 3 files)
+   =============================== */
+
+app.post("/api/edit", noStore, async (req, res) => {
+  const requestId = safeStr(req.body?.requestId || crypto.randomUUID(), 120);
+  try {
+    const editPrompt = safeStr(req.body?.editPrompt || "", 30000);
+    assert(editPrompt, "Missing editPrompt");
+
+    const theme = normalizeTheme(req.body?.theme || {});
+    const builderRules = safeStr(req.body?.builderRules || "", 80000);
+
+    const files = req.body?.files;
+    assert(files && typeof files === "object", "Missing files");
+    assert(typeof files["index.html"] === "string", "Missing index.html");
+    assert(typeof files["style.css"] === "string", "Missing style.css");
+    assert(typeof files["game.js"] === "string", "Missing game.js");
+
+    const screenshotDataUrl = safeStr(req.body?.screenshotDataUrl || "", 4000000);
+
+    const client = getOpenAIClient();
+    if (!client) {
+      // No OpenAI: return original with enforcement
+      const html = ensureCssAndTitle(ensureTikTokScriptOrder(files["index.html"]));
+      return res.json({
+        ok: true,
+        requestId,
+        echoPrompt: editPrompt,
+        files: { "index.html": html, "style.css": files["style.css"], "game.js": files["game.js"] },
+      });
+    }
+
+    const model = String(process.env.OPENAI_MODEL_BUILD || "gpt-4o-mini").trim();
+    const timeoutMs = getTimeoutMs();
+    const temperature = getTemperature();
+
+    const system = buildSystemRules(builderRules);
+    const user = `
 You will receive existing files for a TikTok Live game.
 Apply the edit request and return ONLY JSON with exactly:
 - "index.html"
@@ -325,191 +604,54 @@ ${JSON.stringify(editPrompt)}
 Theme:
 ${JSON.stringify(theme)}
 
+Optional screenshot (data URL, may be empty):
+${JSON.stringify(screenshotDataUrl ? screenshotDataUrl.slice(0, 2000) + "..." : "")}
+
 Existing files:
 index.html: ${JSON.stringify(files["index.html"])}
 style.css: ${JSON.stringify(files["style.css"])}
 game.js: ${JSON.stringify(files["game.js"])}
 
 Rules:
-- Keep TikTok connection pattern intact.
-- Keep settings/connect/start flow intact.
-- Keep 9:16 responsive.
-- Fix issues cleanly; no placeholders.
+- Keep TikTok connection pattern intact
+- Keep settings/connect/start flow intact
+- Start must be gated until connected (unless offline/test mode enabled)
+- Keep 9:16 responsive
+- Maintain the required script dependency order in index.html
 `.trim();
 
-  const r = await openaiJson({ model, system, user, timeoutMs, temperature });
-  if (!r.ok) return { ok: false, error: r.error, raw: r.raw };
-
-  const outFiles = r.json;
-  if (!validateFiles(outFiles)) {
-    return { ok: false, error: "AI edit returned JSON but missing required file keys", raw: r.raw };
-  }
-  return { ok: true, files: outFiles };
-}
-
-/* ===============================
-   Routes
-   =============================== */
-
-app.get("/api/ping", noStore, (_req, res) => {
-  res.json({
-    ok: true,
-    name: "chattok-builder-api",
-    time: new Date().toISOString(),
-  });
-});
-
-app.get("/api/models", noStore, (_req, res) => {
-  res.json({
-    ok: true,
-    models: {
-      spec: process.env.OPENAI_MODEL_SPEC || "gpt-4o-mini",
-      build: process.env.OPENAI_MODEL_BUILD || "gpt-4o-mini",
-    },
-    timeoutMs: getTimeoutMs(),
-    temperature: getTemperature(),
-  });
-});
-
-app.get("/api/routes", noStore, (_req, res) => {
-  res.json({ ok: true, routes: listRoutes(app) });
-});
-
-// PLAN (alias SPEC)
-async function planHandler(req, res) {
-  const requestId = crypto.randomUUID();
-  try {
-    const prompt = safeStr(req.body?.prompt || req.body?.idea || req.body?.text || "");
-    assert(prompt, "Missing prompt");
-
-    const templateId = safeStr(req.body?.templateId || req.body?.template || "arena", 50).toLowerCase();
-    const theme = normalizeTheme(req.body?.theme || req.body?.colors || {});
-    const builderRules = safeStr(req.body?.builderRules || "", 30000);
-
-    let spec;
-    let usedFallback = false;
-
-    const client = getOpenAIClient();
-    if (client) {
-      const r = await generateSpecWithAI({ prompt, templateId, theme, builderRules });
-      if (r.ok) spec = r.spec;
-      else {
-        usedFallback = true;
-        spec = fallbackSpecFromIdea(prompt, templateId, theme);
-      }
-    } else {
-      usedFallback = true;
-      spec = fallbackSpecFromIdea(prompt, templateId, theme);
-    }
-
-    return res.json({
-      ok: true,
-      requestId,
-      echoPrompt: prompt,
-      spec,
-      usedFallback,
-      planText: usedFallback
-        ? "Fallback plan used (OpenAI unavailable or failed)."
-        : "Plan generated successfully.",
-      context: { templateId, theme },
-    });
-  } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({
-      ok: false,
-      requestId,
-      error: err.message || "Plan failed",
-    });
-  }
-}
-
-app.post("/api/plan", noStore, planHandler);
-app.post("/api/spec", noStore, planHandler); // alias for your builder defaults
-
-// BUILD
-app.post("/api/build", noStore, async (req, res) => {
-  const requestId = crypto.randomUUID();
-  try {
-    const prompt = safeStr(req.body?.prompt || req.body?.idea || req.body?.text || "");
-    assert(prompt, "Missing prompt");
-
-    const templateId = safeStr(req.body?.templateId || req.body?.template || "arena", 50).toLowerCase();
-    const theme = normalizeTheme(req.body?.theme || req.body?.colors || {});
-    const builderRules = safeStr(req.body?.builderRules || "", 30000);
-
-    const incomingSpec = req.body?.spec && typeof req.body.spec === "object" ? req.body.spec : null;
-
-    // Ensure we have a spec (AI or fallback)
-    let spec = incomingSpec;
-    if (!spec) {
-      const r = await generateSpecWithAI({ prompt, templateId, theme, builderRules });
-      spec = r.ok ? r.spec : fallbackSpecFromIdea(prompt, templateId, theme);
-    }
-
-    const out = await generateFilesWithAI({ prompt, templateId, theme, spec, builderRules });
-    if (!out.ok) {
-      return res.status(500).json({
-        ok: false,
-        requestId,
-        echoPrompt: prompt,
-        error: out.error || "Build failed",
-        raw: out.raw || null,
-      });
-    }
-
-    return res.json({
-      ok: true,
-      requestId,
-      echoPrompt: prompt,
-      spec,
-      files: out.files,
-    });
-  } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({
-      ok: false,
-      requestId,
-      error: err.message || "Build failed",
-    });
-  }
-});
-
-// EDIT
-app.post("/api/edit", noStore, async (req, res) => {
-  const requestId = crypto.randomUUID();
-  try {
-    const editPrompt = safeStr(req.body?.editPrompt || req.body?.prompt || "");
-    assert(editPrompt, "Missing editPrompt");
-
-    const theme = normalizeTheme(req.body?.theme || req.body?.colors || {});
-    const builderRules = safeStr(req.body?.builderRules || "", 30000);
-
-    const files = req.body?.files;
-    assert(files && typeof files === "object", "Missing files");
-    assert(typeof files["index.html"] === "string", "Missing index.html");
-    assert(typeof files["style.css"] === "string", "Missing style.css");
-    assert(typeof files["game.js"] === "string", "Missing game.js");
-
-    const out = await editFilesWithAI({ editPrompt, theme, files, builderRules });
-    if (!out.ok) {
+    const r = await openaiJson({ model, system, user, timeoutMs, temperature });
+    if (!r.ok) {
       return res.status(500).json({
         ok: false,
         requestId,
         echoPrompt: editPrompt,
-        error: out.error || "Edit failed",
-        raw: out.raw || null,
+        error: r.error || "Edit failed",
+        raw: r.raw || null,
       });
     }
+
+    const out = r.json;
+    if (typeof out?.["index.html"] !== "string" || typeof out?.["style.css"] !== "string" || typeof out?.["game.js"] !== "string") {
+      return res.status(500).json({
+        ok: false,
+        requestId,
+        echoPrompt: editPrompt,
+        error: "AI edit returned JSON but missing required file keys",
+        raw: r.raw || null,
+      });
+    }
+
+    out["index.html"] = ensureCssAndTitle(ensureTikTokScriptOrder(out["index.html"]));
 
     return res.json({
       ok: true,
       requestId,
       echoPrompt: editPrompt,
-      files: out.files,
+      files: out,
     });
   } catch (err) {
-    const status = err.status || 500;
-    return res.status(status).json({
+    res.status(err.status || 500).json({
       ok: false,
       requestId,
       error: err.message || "Edit failed",

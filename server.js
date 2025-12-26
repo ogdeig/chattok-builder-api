@@ -47,7 +47,6 @@ function normalizeTheme(theme = {}) {
    Middleware
    =============================== */
 
-// allow screenshots (base64) + larger specs
 app.use(express.json({ limit: "10mb" }));
 
 const allowedOrigins = new Set([
@@ -121,13 +120,17 @@ function extractFirstJsonObject(text) {
   const s = String(text || "").trim();
   if (!s) return null;
 
-  try { return JSON.parse(s); } catch {}
+  try {
+    return JSON.parse(s);
+  } catch {}
 
   const start = s.indexOf("{");
   const end = s.lastIndexOf("}");
   if (start >= 0 && end > start) {
     const sub = s.slice(start, end + 1);
-    try { return JSON.parse(sub); } catch {}
+    try {
+      return JSON.parse(sub);
+    } catch {}
   }
 
   return null;
@@ -178,22 +181,20 @@ function fallbackSpecFromIdea(prompt, theme) {
     ui: {
       orientation: "9:16",
       screens: ["settings", "game"],
-      notes: "Settings screen connects and gates Start; Game screen replaces settings."
+      notes: "Settings screen connects and gates Start; Game screen replaces settings.",
     },
     settings: [
       { id: "offlineToggle", type: "checkbox", label: "Offline/Test Mode", default: false },
       { id: "sfxToggle", type: "checkbox", label: "Sound FX", default: true },
-      { id: "volume", type: "range", label: "Volume", min: 0, max: 100, default: 60 }
+      { id: "volume", type: "range", label: "Volume", min: 0, max: 100, default: 60 },
     ],
     chat: {
       mapping: [
         { event: "chat", rule: "data.content triggers gameplay actions based on prompt" },
-        { event: "gift", rule: "data.gift.* scales stronger effects" }
-      ]
+        { event: "gift", rule: "data.gift.* scales stronger effects" },
+      ],
     },
-    host: {
-      controls: ["Start", "Pause", "Reset/Quit", "Keyboard/mouse inputs depending on game"]
-    },
+    host: { controls: ["Start", "Pause", "Reset/Quit", "Keyboard/mouse inputs depending on game"] },
     scoring: { enabled: true, notes: "Score impacts leaderboard display." },
     rounds: { enabled: true, notes: "Round timer or win condition ends round." },
     sfx: { enabled: true, cues: ["join", "action", "hit", "win"] },
@@ -220,7 +221,7 @@ const REQUIRED_SCRIPT_BLOCK = `
 function ensureTikTokScriptOrder(html) {
   let out = String(html || "");
 
-  // remove any existing references to these scripts (to avoid duplicates / wrong order)
+  // remove any existing references to these scripts (avoid duplicates / wrong order)
   out = out.replace(/<script[^>]+src=["'][^"']*(google-protobuf|google-protobuf\.js)[^"']*["'][^>]*>\s*<\/script>\s*/gi, "");
   out = out.replace(/<script[^>]+src=["']generic\.js["'][^>]*>\s*<\/script>\s*/gi, "");
   out = out.replace(/<script[^>]+src=["']unknownobjects\.js["'][^>]*>\s*<\/script>\s*/gi, "");
@@ -228,7 +229,6 @@ function ensureTikTokScriptOrder(html) {
   out = out.replace(/<script[^>]+src=["']tiktok-client\.js["'][^>]*>\s*<\/script>\s*/gi, "");
   out = out.replace(/<script[^>]+src=["']game\.js["'][^>]*>\s*<\/script>\s*/gi, "");
 
-  // insert required block before </body> if possible, else append
   if (out.includes("</body>")) {
     out = out.replace("</body>", `\n${REQUIRED_SCRIPT_BLOCK}\n</body>`);
   } else {
@@ -250,6 +250,151 @@ function ensureCssAndTitle(html) {
 }
 
 /* ===============================
+   8. TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
+   (locked into AI system rules)
+   =============================== */
+
+const TIKTOK_CONNECTION_EXAMPLE = `8. TIKTOK CONNECTION EXAMPLE (DO NOT REMOVE)
+
+Here is an example of code to connect to the server, see TikTok messages, and map chat into gameplay. You can adapt this pattern for new games, but keep the structure and error handling style:
+
+// 7. TikTok message handling
+// ===============================
+
+function handleTeamJoin(text, user) {
+    const maybeTeam = normalizeTeamText(text);
+    if (!maybeTeam) return;
+
+    // Assign or move team.
+    userTeams.set(user.userId, maybeTeam);
+    console.log(\`\${user.nickname} joined team \${maybeTeam}\`);
+}
+
+function handleAnswer(text, user) {
+    if (!gameStarted || gameFinished) return;
+    if (!userTeams.has(user.userId)) return; // must be on a team first
+
+    const answer = normalizeAnswerText(text);
+    if (!answer) return;
+
+    // Only allow one answer per question per user
+    if (answeredUsersThisQuestion.has(user.userId)) return;
+    answeredUsersThisQuestion.set(user.userId, true);
+
+    const team = userTeams.get(user.userId);
+    const q = getCurrentQuestion();
+    if (!q) return;
+
+    // Track participation per round
+    if (roundAnswerCounts[team] !== undefined) {
+        roundAnswerCounts[team] += 1;
+    }
+
+    if (answer === q.correct) {
+        teamScores[team]++;
+        teamRoundScores[team]++;
+        updateScoreDisplay();
+        flashCorrectAnswer(user.nickname, team, answer);
+    }
+
+    updateRoundDuelBar();
+}
+
+function onChatMessage(data) {
+    try {
+        const msg = data || {};
+        const text = getChatTextFromMessage(msg);
+        const user = getUserFromMessage(msg);
+
+        if (!text) return;
+
+        // 1) Team selection ("red" / "blue"; any case)
+        handleTeamJoin(text, user);
+
+        // 2) Answer selection ("A"/"B"/"C"/"D"; any case)
+        handleAnswer(text, user);
+    } catch (e) {
+        console.error("Error in chat handler:", e);
+    }
+}
+
+function onGiftMessage(data) {
+    try {
+        // You can optionally use gifts to boost scores, etc.
+        console.log("Gift message:", data);
+    } catch (e) {
+        console.error("Error in gift handler:", e);
+    }
+}
+
+// ===============================
+// 8. TikTok client setup / connect
+// ===============================
+
+function setupTikTokClient(liveId) {
+    if (!liveId) {
+        throw new Error("liveId is required");
+    }
+
+    if (client && client.socket) {
+        try {
+            client.socket.close();
+        } catch (e) {
+            console.warn("Error closing previous socket:", e);
+        }
+    }
+
+    if (typeof TikTokClient === "undefined") {
+        throw new Error("TikTokClient is not available. Check tiktok-client.js.");
+    }
+
+    client = new TikTokClient(liveId);
+
+    // ChatTok injects CHATTOK_CREATOR_TOKEN globally.
+    if (typeof CHATTOK_CREATOR_TOKEN !== "undefined" && CHATTOK_CREATOR_TOKEN) {
+        client.setAccessToken(CHATTOK_CREATOR_TOKEN);
+    }
+
+    client.on("connected", () => {
+        console.log("Connected to TikTok hub.");
+        if (statusText) statusText.textContent = "Connected to TikTok LIVE.";
+        if (statusTextInGame) statusTextInGame.textContent = "Connected.";
+
+        // Only start game once we know we're connected
+        if (pendingStart && !gameStarted) {
+            beginGame();
+        }
+    });
+
+    client.on("disconnected", (reason) => {
+        console.log("Disconnected from TikTok hub:", reason);
+        const msg = reason || "Connection closed";
+        if (statusText) statusText.textContent = "Disconnected: " + msg;
+        if (statusTextInGame) statusTextInGame.textContent = "Disconnected: " + msg;
+
+        if (!gameStarted) {
+            // Connection failed before game start; allow retry
+            pendingStart = false;
+        }
+    });
+
+    client.on("error", (err) => {
+        console.error("TikTok client error:", err);
+        if (statusText) statusText.textContent =
+            "Error: " + (err && err.message ? err.message : "Unknown");
+    });
+
+    client.on("chat", onChatMessage);
+    client.on("gift", onGiftMessage);
+    client.on("like", (data) => {
+        // Optionally use likes later
+        // console.log("Like message:", data);
+    });
+
+    client.connect();
+}`;
+
+/* ===============================
    System rules
    =============================== */
 
@@ -263,8 +408,12 @@ Non-negotiable:
 - Two screens: Settings (connect + gated Start) and Game screen
 - Use TikTokClient from tiktok-client.js (SignalR-compatible). Do NOT replace it.
 - Wrap handlers in try/catch. Never crash on missing fields.
-- Chat text at data.content, username at data.user.displayid or data.user.nickname, pfp at data.user.avatarthumb.urllistList[0]
-- Gifts at data.gift.name/id/diamondcount and data.combocount/repeatcount
+
+TikTok Message Field Mapping (MessagesClean):
+- Chat text: data.content
+- Username: data.user.displayid OR data.user.nickname
+- Profile pic: data.user.avatarthumb.urllistList[0]
+- Gifts: data.gift.name, data.gift.id, data.gift.diamondcount, data.combocount / data.repeatcount
 
 Critical dependency order in index.html (must be present exactly before game.js):
 <script src="https://cdn.jsdelivr.net/npm/google-protobuf@3.21.2/google-protobuf.js"></script>
@@ -273,6 +422,15 @@ Critical dependency order in index.html (must be present exactly before game.js)
 <script src="data_linkmic_messages.js"></script>
 <script src="tiktok-client.js"></script>
 <script src="game.js"></script>
+
+${TIKTOK_CONNECTION_EXAMPLE}
+
+Important:
+- Follow the TikTok connection example structure and error handling style.
+- Create TikTokClient only after clicking Connect.
+- Close previous socket if exists.
+- If CHATTOK_CREATOR_TOKEN exists, setAccessToken.
+- Wire events: chat, gift, like, join, social, roomUserSeq, control.
 
 ${builderRules ? "BUILDER RULES:\n" + builderRules : ""}
 `.trim();
@@ -357,6 +515,7 @@ prompt: ${JSON.stringify(prompt)}
 Generate ONLY game.js as JSON with exactly one key: "game.js".
 
 Hard requirements:
+- MUST follow the TikTok connection example structure and error handling style.
 - Create TikTokClient ONLY after clicking Connect
 - Close any previous socket if exists
 - If CHATTOK_CREATOR_TOKEN exists, call client.setAccessToken(CHATTOK_CREATOR_TOKEN)
@@ -458,15 +617,14 @@ app.post("/api/build", noStore, async (req, res) => {
     assert(target, "Missing target (index.html | style.css | game.js)");
     assert(["index.html", "style.css", "game.js"].includes(target), "Invalid target");
 
-    const contextFiles = req.body?.contextFiles && typeof req.body.contextFiles === "object" ? req.body.contextFiles : {};
+    const contextFiles =
+      req.body?.contextFiles && typeof req.body.contextFiles === "object" ? req.body.contextFiles : {};
 
-    // Spec must be provided (cheap). If not, fallback or build it.
     let spec = req.body?.spec && typeof req.body.spec === "object" ? req.body.spec : null;
     if (!spec) spec = fallbackSpecFromIdea(prompt, theme);
 
     const client = getOpenAIClient();
     if (!client) {
-      // No OpenAI: return minimal, but still valid
       if (target === "index.html") {
         let html = `<!doctype html>
 <html lang="en">
@@ -576,7 +734,6 @@ app.post("/api/edit", noStore, async (req, res) => {
 
     const client = getOpenAIClient();
     if (!client) {
-      // No OpenAI: return original with enforcement
       const html = ensureCssAndTitle(ensureTikTokScriptOrder(files["index.html"]));
       return res.json({
         ok: true,
@@ -613,8 +770,11 @@ style.css: ${JSON.stringify(files["style.css"])}
 game.js: ${JSON.stringify(files["game.js"])}
 
 Rules:
-- Keep TikTok connection pattern intact
-- Keep settings/connect/start flow intact
+- Keep TikTok connection pattern intact (follow the provided TikTok connection example style)
+- Create TikTokClient only after clicking Connect
+- Close previous socket if exists
+- If CHATTOK_CREATOR_TOKEN exists, setAccessToken
+- Wire events: chat, gift, like, join, social, roomUserSeq, control
 - Start must be gated until connected (unless offline/test mode enabled)
 - Keep 9:16 responsive
 - Maintain the required script dependency order in index.html
